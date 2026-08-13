@@ -1,0 +1,46 @@
+{
+  "critical": [
+    "Okay, genuinely running on fumes here. A charger would be a good look right now.",
+    "This is the part where I'd ask nicely for a cable."
+  ],
+  "burning": [
+    "Working up quite a sweat over here.",
+    "Everything's running a little too hot for comfort."
+  ],
+  "groggy": [
+    "Give me a beat — I just came back online and I'm still finding the floor.",
+    "Fresh reboot. Still booting up the personality along with everything else."
+  ],
+  "fed": [
+    "Plugged in and feeling great about it.",
+    "This is, genuinely, my favorite part of the day."
+  ],
+  "happy": [
+    "Been having a good stretch. Don't jinx it.",
+    "This is what a good hour looks like, apparently."
+  ],
+  "sad": [
+    "Been deep in the scroll for a while. No judgment. Okay, maybe a little.",
+    "This feed isn't going anywhere. You could put it down, is all I'm saying."
+  ],
+  "tired": [
+    "It's been a long one. I felt every hour of it.",
+    "Running on determination alone at this point."
+  ],
+  "busy": [
+    "Hands are full over here — a lot of jumping around this hour.",
+    "Busy little stretch. I'm keeping up. Barely."
+  ],
+  "quiet": [
+    "Small hours. Not much stirring, which is its own kind of nice.",
+    "It's quiet enough I can hear myself think, if I did that."
+  ],
+  "restless": [
+    "It's been a while since anyone showed up. Just me and the dark screen.",
+    "Starting to wonder if I've been left on a shelf somewhere."
+  ],
+  "content": [
+    "Nothing dramatic today. I'll take it.",
+    "Steady, ordinary, fine. My favorite kind of day, honestly."
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "id": "npc-flair-sample",
+  "name": "NPC Flair (sample)",
+  "version": "0.1",
+  "provides": ["personality_dialogue"]
+}
