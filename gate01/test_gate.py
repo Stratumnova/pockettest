@@ -1,5 +1,7 @@
-import asyncio,tempfile
+import asyncio,tempfile,os
 from pathlib import Path
+os.environ.setdefault("POCKET_GPT_PATH", "t"*24 + "gpt")
+os.environ.setdefault("POCKET_CLAUDE_PATH", "t"*24 + "claude")
 import server
 
 def reset(p):
