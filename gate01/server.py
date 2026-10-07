@@ -84,8 +84,16 @@ def make_mcp(who):
     return m
 
 GPT=make_mcp("gpt"); CLAUDE=make_mcp("claude")
-GPT_PATH="/"+os.environ.get("POCKET_GPT_PATH","CHANGE-ME-GPT").strip("/")
-CLAUDE_PATH="/"+os.environ.get("POCKET_CLAUDE_PATH","CHANGE-ME-CLAUDE").strip("/")
+def _secret_path(name):
+    value=os.environ.get(name,"").strip("/")
+    if len(value)<24 or "CHANGE-ME" in value.upper():
+        raise SystemExit(f"{name} must be a random path of at least 24 characters")
+    return "/"+value
+
+GPT_PATH=_secret_path("POCKET_GPT_PATH")
+CLAUDE_PATH=_secret_path("POCKET_CLAUDE_PATH")
+if GPT_PATH==CLAUDE_PATH:
+    raise SystemExit("GPT and Claude paths must differ")
 
 @asynccontextmanager
 async def lifespan(app):
