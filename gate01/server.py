@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.routing import Mount
 
@@ -72,8 +73,18 @@ async def append_logic(who,message,references=None):
         _write_event(event); pending_read[who]=None
         return {"ok":True,"event_id":event["id"],"duplicate":False}
 
+def _transport_security():
+    hosts=["127.0.0.1:*","localhost:*","[::1]:*"]
+    extra=[h.strip().lower() for h in os.environ.get("POCKET_ALLOWED_HOSTS","").split(",") if h.strip()]
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=hosts+extra,
+        allowed_origins=[f"https://{h}" for h in extra],
+    )
+
 def make_mcp(who):
-    m=FastMCP(f"Pocket Gate {who}",stateless_http=True,json_response=True)
+    m=FastMCP(f"Pocket Gate {who}",stateless_http=True,json_response=True,
+              transport_security=_transport_security())
     @m.tool()
     def server_status(): return status(who)
     @m.tool()
