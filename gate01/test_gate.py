@@ -39,3 +39,10 @@ def test_truncated_tail_quarantine():
         server.recover_once()
         ev=server._parse_ledger()
         assert len(ev)==1 and server.QUARANTINE.exists()
+
+
+def test_first_partial_line_is_ignored():
+    with tempfile.TemporaryDirectory() as d:
+        reset(d)
+        server.LEDGER.write_bytes(b'{"id":1')
+        assert server._parse_ledger()==[]
