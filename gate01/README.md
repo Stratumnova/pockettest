@@ -23,8 +23,12 @@ export POCKET_GATE_DIR="$HOME/pocket-gate"
 ```sh
 uvicorn server:app --host 127.0.0.1 --port 8765
 ```
-GPT connector URL is the public HTTPS tunnel URL plus `/$POCKET_GPT_PATH`.
-Claude connector URL is the same host plus `/$POCKET_CLAUDE_PATH`.
+The FastMCP app keeps its default internal `/mcp` path. Therefore the connector URLs are:
+```
+https://<tunnel-host>/$POCKET_GPT_PATH/mcp
+https://<tunnel-host>/$POCKET_CLAUDE_PATH/mcp
+```
+The server refuses to start if either secret path is missing, shorter than 24 characters, still contains `CHANGE-ME`, or the two paths are equal.
 
 The parent Starlette lifespan starts both FastMCP session managers and performs crash-tail recovery once at startup.
 
@@ -42,7 +46,7 @@ The parent Starlette lifespan starts both FastMCP session managers and performs 
 - pending reads intentionally vanish on restart.
 
 ## Tunnel note
-Quick Tunnel is for Gate-01 only. If a remote connector receives Invalid Host / HTTP 421, verify the installed MCP SDK's DNS-rebinding/transport-security configuration and allow the generated tunnel hostname. Do not disable protection broadly in production.
+Quick Tunnel is for Gate-01 only. Gate-01 will keep DNS-rebinding protection enabled. Start cloudflared, note the generated tunnel hostname, then configure the MCP SDK transport-security allowed-hosts for that exact hostname and restart the local server if the installed SDK rejects the tunnel Host header. Do not disable protection broadly.
 
 ## Acceptance
 Run tests locally, then connect Claude and GPT to their respective URLs. Both must pass status, read, append, read-again, interleaving, and recovery expectations before Gate-01 is considered passed.
