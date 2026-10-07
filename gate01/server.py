@@ -17,9 +17,9 @@ pending_read={"gpt":None,"claude":None}
 def _parse_ledger()->list[dict[str,Any]]:
     if not LEDGER.exists(): return []
     raw=LEDGER.read_bytes()
-    # Normal reads never repair. Ignore a crash/in-progress unterminated tail.
-    lines=raw.splitlines() if raw.endswith(b"\n") else raw.rsplit(b"\n",1)[0].splitlines()
-    return [json.loads(x) for x in lines if x.strip()]
+    # Parse only complete newline-terminated records. Never repair during a read.
+    cut = len(raw) if raw.endswith(b"\n") else raw.rfind(b"\n") + 1
+    return [json.loads(x) for x in raw[:cut].splitlines() if x.strip()]
 
 def recover_once():
     ROOT.mkdir(parents=True,exist_ok=True)
