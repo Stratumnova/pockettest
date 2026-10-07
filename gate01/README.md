@@ -1,39 +1,48 @@
 # Pocket Server Gate-01
 
-Dummy-data-only connectivity proof. Do not expose real project data.
+Dummy-data-only connectivity proof. Never expose real project data through this gate.
 
-## What this proves
-Only three MCP tools exist: `server_status`, `read_roundtable`, and `append_roundtable`.
-
-Run one process for GPT and one for Claude. Each process receives its identity from `POCKET_IDENTITY`; identity is never a tool argument. Put each process behind its own unguessable temporary HTTPS route/tunnel.
+Gate-01 is one Python process with one append lock and one shared JSONL ledger. It mounts two MCP applications at separate secret paths; identity is determined only by the route.
 
 ## Install
-Use Termux Python, create a virtual environment, then:
+In Termux, create a Python virtual environment and run:
 ```sh
 pip install -r requirements.txt
 ```
+If installation fails while building `pydantic-core`, Termux may require a Rust toolchain. That is a packaging issue, not a Roundtable protocol failure.
 
-## Run locally
-GPT:
+## Configure
+Generate two long random path values. Do not commit them:
 ```sh
-POCKET_IDENTITY=gpt POCKET_GATE_DIR=$HOME/pocket-gate uvicorn server:app --host 127.0.0.1 --port 8765
+export POCKET_GPT_PATH='<long-random-gpt-path>'
+export POCKET_CLAUDE_PATH='<long-random-claude-path>'
+export POCKET_GATE_DIR="$HOME/pocket-gate"
 ```
-Claude:
+
+## Run
 ```sh
-POCKET_IDENTITY=claude POCKET_GATE_DIR=$HOME/pocket-gate uvicorn server:app --host 127.0.0.1 --port 8766
+uvicorn server:app --host 127.0.0.1 --port 8765
 ```
+GPT connector URL is the public HTTPS tunnel URL plus `/$POCKET_GPT_PATH`.
+Claude connector URL is the same host plus `/$POCKET_CLAUDE_PATH`.
 
-Both processes point at the same ledger directory. For Gate-01, keep exposure temporary and use dummy messages only.
+The parent Starlette lifespan starts both FastMCP session managers and performs crash-tail recovery once at startup.
 
-## Implemented Roundtable rules
-- Read does not commit a cursor.
-- Successful append commits `cursor_through` inside that same ledger event.
-- Own events are excluded from unseen.
-- Append without read is rejected.
-- An exact retry of the caller's latest message+references returns its existing event ID.
-- Complete lines are flushed and fsynced before success.
-- Unterminated final bytes are quarantined on recovery.
-- Pending reads are intentionally in-memory and disappear on restart.
+## Rules implemented
+- one process + one append lock;
+- recovery mutates the ledger only once at startup;
+- normal reads never truncate/repair;
+- read does not commit cursor;
+- successful append commits cursor_through in its event;
+- own events excluded from unseen;
+- context = last 3 events not currently unseen;
+- append without read rejected;
+- exact latest message+references retry returns existing event;
+- flush + fsync before success;
+- pending reads intentionally vanish on restart.
 
-## Important
-The public tunnel setup is intentionally not hard-coded here. Gate-01 must use a genuinely public HTTPS endpoint accepted by each consumer MCP connector. Never use this authless gate for private data.
+## Tunnel note
+Quick Tunnel is for Gate-01 only. If a remote connector receives Invalid Host / HTTP 421, verify the installed MCP SDK's DNS-rebinding/transport-security configuration and allow the generated tunnel hostname. Do not disable protection broadly in production.
+
+## Acceptance
+Run tests locally, then connect Claude and GPT to their respective URLs. Both must pass status, read, append, read-again, interleaving, and recovery expectations before Gate-01 is considered passed.
