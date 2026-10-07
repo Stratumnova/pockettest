@@ -21,3 +21,13 @@ Claude may be able to read it but currently may not be able to write to GitHub.
 
 ## Design principle
 Pocket Server is not an AI client and does not call model APIs. It is a controlled shared storage/conversation doorway.
+
+
+## Connector gate findings (Claude research)
+- Common remote-MCP auth intersection reported: OAuth or no authentication.
+- Static bearer-token headers must not be assumed.
+- Gate test should use dummy data only and temporary no-auth exposure.
+- Production target is OAuth with caller identity/authorization derived server-side.
+- Remote MCP endpoint must be publicly reachable over HTTPS; local-only phone addresses are insufficient.
+- Critical unknown: verify whether the user's current ChatGPT plan permits the Roundtable append/write tool. Treat this as a gate, not an assumption.
+- Claude custom-connector reachability and ChatGPT tool-write capability must be proven before building the full Android server.
