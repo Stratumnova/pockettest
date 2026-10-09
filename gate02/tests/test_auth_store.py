@@ -36,8 +36,7 @@ def test_deny_and_expire(store):
 
 def test_binding_failure_rolls_back(store):
     txn,_ = pending(store)
-    with pytest.raises(ValueError):
-        store.approve(txn,"missing/profile",now=1001)
+    assert not store.approve(txn,"missing/profile",now=1001)
     with store.connect() as db:
         assert db.execute("SELECT status FROM pending_txns WHERE txn_id=?",(txn,)).fetchone()[0] == "pending"
         assert db.execute("SELECT profile_id FROM connections WHERE client_id='client1'").fetchone()[0] is None
@@ -81,3 +80,31 @@ def test_callback_and_queue_limit(store):
 def test_hashes():
     assert digest("secret") != "secret"
     assert len(digest("secret")) == 64
+
+def test_bound_connection_does_not_expire(store):
+    txn,_ = pending(store)
+    assert store.approve(txn,"owner/claude",now=1001)
+    with store.connect() as db:
+        assert db.execute("SELECT expires_at FROM connections WHERE client_id='client1'").fetchone()[0] is None
+    later,_ = pending(store,now=2000)
+    assert store.approve(later,"owner/claude",now=2001)
+
+def test_reject_future_schema_version(tmp_path):
+    path = tmp_path / "future.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.execute("PRAGMA user_version=2")
+    with pytest.raises(RuntimeError,match="Unsupported"):
+        AuthStore(path)
+    with sqlite3.connect(path) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+
+def test_code_lookup(store):
+    txn,code = pending(store)
+    assert store.resolve_pending_code(code,now=1001) == txn
+    with pytest.raises(ValueError):
+        store.resolve_pending_code("not-a-code",now=1001)
+
+def test_platform_binding(store):
+    store.create_profile("owner","chatgpt")
+    txn,_ = pending(store)
+    assert not store.approve(txn,"owner/chatgpt",now=1001)
