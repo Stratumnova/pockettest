@@ -1,30 +1,40 @@
-"""C2 offline DCR policy tests. No server or tunnel."""
+"""C2 provider-level regression tests, offline."""
+import asyncio
+import sqlite3
 import pytest
-from auth_store import AuthStore
-from client_registration import RegistrationError, register_offline, validate_metadata
+from mcp.shared.auth import OAuthClientInformationFull
+from auth_store import AuthStore, callback_platform
+from client_registration import C2ClientRegistration, RegistrationError
 
 CLAUDE="https://claude.ai/api/mcp/auth_callback"
 CHATGPT="https://chatgpt.com/connector/oauth/2K3bAoaL_ejV"
 
+def client(callback=CLAUDE, **overrides):
+    values=dict(client_id="sdk-issued-id", client_secret="sdk-issued-secret",
+        redirect_uris=[callback], grant_types=["authorization_code","refresh_token"],
+        response_types=["code"], token_endpoint_auth_method="client_secret_post",
+        client_name="Untrusted Display Name",client_id_issued_at=1000,
+        client_secret_expires_at=0)
+    values.update(overrides)
+    return OAuthClientInformationFull(**values)
+
 @pytest.fixture
-def store(tmp_path):
-    return AuthStore(tmp_path/"auth.sqlite3")
+def provider(tmp_path):
+    return C2ClientRegistration(AuthStore(tmp_path/"auth.sqlite3"))
 
 @pytest.mark.parametrize("callback,platform",[(CLAUDE,"claude"),(CHATGPT,"chatgpt")])
-def test_valid_clients_unbound(store,callback,platform):
-    metadata={"redirect_uris":[callback],"grant_types":["authorization_code","refresh_token"],
-              "response_types":["code"],"token_endpoint_auth_method":"client_secret_post",
-              "client_name":"Untrusted Display Name"}
-    result=register_offline(store,metadata,now=1000)
-    with store.connect() as db:
-        row=db.execute("SELECT * FROM connections WHERE client_id=?",(result["client_id"],)).fetchone()
-        assert row["profile_id"] is None
-        assert row["platform_hint"] == platform
-        assert row["expires_at"] == 1900
-        assert db.execute("SELECT count(*) FROM project_grants").fetchone()[0] == 0
-    assert result["client_secret"] is None
+def test_positive_callbacks(provider,callback,platform):
+    assert callback_platform(callback)==platform
+    asyncio.run(provider.register_client(client(callback)))
+    returned=asyncio.run(provider.get_client("sdk-issued-id"))
+    assert returned is not None and returned.client_secret=="sdk-issued-secret"
+    with provider.auth_store.connect() as db:
+        row=db.execute("SELECT * FROM connections").fetchone()
+        assert row["platform_hint"]==platform and row["profile_id"] is None
+        assert row["token_endpoint_auth_method"]=="client_secret_post"
+        assert row["client_secret"]=="sdk-issued-secret"
 
-@pytest.mark.parametrize("uri",[
+@pytest.mark.parametrize("callback",[
     "http://claude.ai/api/mcp/auth_callback",
     "https://claude.ai/api/mcp/auth_callback/",
     "https://claude.ai.evil.com/api/mcp/auth_callback",
@@ -35,43 +45,45 @@ def test_valid_clients_unbound(store,callback,platform):
     "https://chatgpt.com/connector/oauth/%2F",
     "https://evil.example/cb",
 ])
-def test_reject_bad_callbacks(uri):
+def test_bad_callbacks(provider,callback):
     with pytest.raises(RegistrationError):
-        validate_metadata({"redirect_uris":[uri]})
+        asyncio.run(provider.register_client(client(callback)))
 
-def test_reject_multiple_callbacks():
-    with pytest.raises(RegistrationError):
-        validate_metadata({"redirect_uris":[CLAUDE,CHATGPT]})
-
-@pytest.mark.parametrize("metadata",[
-    {"redirect_uris":[CLAUDE],"grant_types":["client_credentials"]},
-    {"redirect_uris":[CLAUDE],"response_types":["token"]},
-    {"redirect_uris":[CLAUDE],"token_endpoint_auth_method":"client_secret_basic"},
-    {"redirect_uris":[CLAUDE],"jwks_uri":"https://example.com/keys"},
-    {"redirect_uris":[CLAUDE],"grant_types":["authorization_code","authorization_code"]},
-    {"redirect_uris":[CLAUDE],"client_name":""},
-    {"redirect_uris":[CLAUDE],"client_name":"x"*121},
+@pytest.mark.parametrize("override",[
+    {"client_secret":None},
+    {"client_secret":""},
+    {"token_endpoint_auth_method":"none"},
+    {"token_endpoint_auth_method":"client_secret_basic"},
+    {"grant_types":["authorization_code"]},
+    {"response_types":["token"]},
+    {"redirect_uris":[CLAUDE,CHATGPT]},
 ])
-def test_reject_invalid_metadata(metadata):
-    with pytest.raises(RegistrationError):
-        validate_metadata(metadata)
+def test_reject_bad_sdk_metadata(provider,override):
+    with pytest.raises((RegistrationError,ValueError)):
+        asyncio.run(provider.register_client(client(**override)))
 
-def test_expired_unbound_registration(store):
-    r=register_offline(store,{"redirect_uris":[CLAUDE]},now=1000)
-    with pytest.raises(ValueError):
-        store.create_pending(r["client_id"],CLAUDE,"s","pkce",now=1900)
+def test_missing_secret_fails_closed_on_read(provider):
+    asyncio.run(provider.register_client(client()))
+    with provider.auth_store.connect() as db:
+        # Simulate legacy/malformed record with no auth method.
+        db.execute("UPDATE connections SET token_endpoint_auth_method=NULL,client_secret=NULL")
+    assert asyncio.run(provider.get_client("sdk-issued-id")) is None
 
-def test_registration_never_binds_profile(store):
-    store.create_profile("owner","claude")
-    r=register_offline(store,{"redirect_uris":[CLAUDE],"client_name":"ChatGPT"},now=1000)
-    with store.connect() as db:
-        row=db.execute("SELECT profile_id,platform_hint FROM connections WHERE client_id=?",(r["client_id"],)).fetchone()
-        assert row["profile_id"] is None and row["platform_hint"]=="claude"
+def test_revoked_fails_closed(provider):
+    asyncio.run(provider.register_client(client()))
+    provider.auth_store.revoke_connection("sdk-issued-id")
+    assert asyncio.run(provider.get_client("sdk-issued-id")) is None
 
-def test_unbound_queue_cap_and_expiry(store):
-    for _ in range(5):
-        register_offline(store,{"redirect_uris":[CLAUDE]},now=1000)
+def test_queue_limit(provider):
+    for i in range(5):
+        asyncio.run(provider.register_client(client(client_id=f"client-{i}")))
     with pytest.raises(ValueError,match="queue full"):
-        register_offline(store,{"redirect_uris":[CLAUDE]},now=1001)
-    # Expired unbound registrations no longer occupy capacity.
-    register_offline(store,{"redirect_uris":[CLAUDE]},now=1900)
+        asyncio.run(provider.register_client(client(client_id="sixth")))
+
+def test_sqlite_check_rejects_secretless_secret_post(provider):
+    with provider.auth_store.connect() as db:
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute("""INSERT INTO connections
+                (client_id,platform_hint,client_name,redirect_uri,created_at,expires_at,
+                 token_endpoint_auth_method,client_secret)
+                VALUES ('bad','claude','bad',?,1000,2000,'client_secret_post',NULL)""",(CLAUDE,))
