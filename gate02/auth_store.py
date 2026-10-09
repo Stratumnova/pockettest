@@ -49,7 +49,16 @@ class AuthStore:
             os.close(fd)
         os.chmod(self.path, 0o600)
         with self.connect() as db:
-            db.execute("PRAGMA journal_mode=WAL")
+            for attempt in range(50):
+                try:
+                    db.execute("PRAGMA journal_mode=WAL")
+                    break
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc).lower():
+                        raise
+                    if attempt == 49:
+                        raise
+                    time.sleep(0.1)
             db.execute("BEGIN IMMEDIATE")
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version not in (0, 1, SCHEMA_VERSION):
@@ -213,7 +222,10 @@ class AuthStore:
             if not self._client_row_valid(client, now) or client["redirect_uri"] != redirect_uri:
                 raise ValueError("Invalid client or callback")
             registered = set(client["scope"].split())
-            requested = registered if scopes is None else set(scopes.split()) if isinstance(scopes, str) else set()
+            requested = (registered if scopes is None else
+                         set(scopes.split()) if isinstance(scopes, str) else
+                         set(scopes) if isinstance(scopes, (list, tuple)) and
+                         all(isinstance(item, str) for item in scopes) else set())
             if not requested or not requested.issubset(registered) or not requested.issubset({"roundtable.append"}):
                 raise ValueError("Invalid requested scopes")
             resolved_scopes = " ".join(sorted(requested))
