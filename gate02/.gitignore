@@ -1,2 +1,8 @@
 observations.jsonl
 observations.jsonl.*
+auth.sqlite3
+auth.sqlite3-*
+*.sqlite3
+*.sqlite3-*
+__pycache__/
+.pytest_cache/
