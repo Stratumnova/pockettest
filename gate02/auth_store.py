@@ -1,0 +1,234 @@
+"""Gate-02A C1: offline SQLite auth state. Not wired into public server."""
+import hashlib
+import os
+import secrets
+import sqlite3
+import time
+from pathlib import Path
+
+SCHEMA_VERSION = 1
+
+def digest(value):
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+class AuthStore:
+    def __init__(self, path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._init()
+
+    def connect(self):
+        db = sqlite3.connect(str(self.path), timeout=5, isolation_level=None)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA busy_timeout=5000")
+        db.execute("PRAGMA foreign_keys=ON")
+        return db
+
+    def _init(self):
+        if not self.path.exists():
+            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(fd)
+        os.chmod(self.path, 0o600)
+        with self.connect() as db:
+            db.execute("PRAGMA journal_mode=WAL")
+            db.executescript("""
+            CREATE TABLE IF NOT EXISTS profiles (
+                profile_id TEXT PRIMARY KEY,
+                human_id TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                revoked_at INTEGER,
+                UNIQUE(human_id, platform)
+            );
+            CREATE TABLE IF NOT EXISTS connections (
+                client_id TEXT PRIMARY KEY,
+                platform_hint TEXT NOT NULL,
+                client_name TEXT NOT NULL,
+                redirect_uri TEXT NOT NULL,
+                profile_id TEXT REFERENCES profiles(profile_id),
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                revoked_at INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS pending_txns (
+                txn_id TEXT PRIMARY KEY,
+                client_id TEXT NOT NULL REFERENCES connections(client_id),
+                match_code TEXT NOT NULL,
+                redirect_uri TEXT NOT NULL,
+                state TEXT NOT NULL,
+                code_challenge TEXT NOT NULL,
+                scopes TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending','approved','denied','expired','consumed')),
+                approved_profile TEXT REFERENCES profiles(profile_id)
+            );
+            CREATE TABLE IF NOT EXISTS auth_codes (
+                code_hash TEXT PRIMARY KEY,
+                txn_id TEXT NOT NULL REFERENCES pending_txns(txn_id),
+                expires_at INTEGER NOT NULL,
+                used_at INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS access_tokens (
+                token_hash TEXT PRIMARY KEY,
+                client_id TEXT NOT NULL REFERENCES connections(client_id),
+                resource TEXT NOT NULL,
+                scopes TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                revoked_at INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS refresh_tokens (
+                token_hash TEXT PRIMARY KEY,
+                client_id TEXT NOT NULL REFERENCES connections(client_id),
+                scopes TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                used_at INTEGER,
+                revoked_at INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS project_grants (
+                profile_id TEXT NOT NULL REFERENCES profiles(profile_id),
+                project_id TEXT NOT NULL,
+                can_read INTEGER NOT NULL DEFAULT 0 CHECK(can_read IN (0,1)),
+                can_submit INTEGER NOT NULL DEFAULT 0 CHECK(can_submit IN (0,1)),
+                PRIMARY KEY(profile_id, project_id)
+            );
+            CREATE TABLE IF NOT EXISTS revocations (
+                revocation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_type TEXT NOT NULL CHECK(target_type IN ('connection','profile')),
+                target_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            PRAGMA user_version=1;
+            """)
+            if db.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+                raise RuntimeError("Unsupported auth schema")
+
+    def create_profile(self, human_id, platform):
+        profile_id = human_id + "/" + platform
+        with self.connect() as db:
+            db.execute("INSERT INTO profiles(profile_id,human_id,platform) VALUES(?,?,?)",
+                       (profile_id, human_id, platform))
+        return profile_id
+
+    def register_connection(self, client_id, platform_hint, client_name, redirect_uri,
+                            ttl=900, now=None):
+        now = int(time.time()) if now is None else int(now)
+        with self.connect() as db:
+            db.execute("""INSERT INTO connections
+                (client_id,platform_hint,client_name,redirect_uri,created_at,expires_at)
+                VALUES(?,?,?,?,?,?)""",
+                (client_id, platform_hint, client_name, redirect_uri, now, now+ttl))
+
+    def create_pending(self, client_id, redirect_uri, state, code_challenge,
+                       scopes="roundtable.append", ttl=180, now=None):
+        now = int(time.time()) if now is None else int(now)
+        txn_id = secrets.token_urlsafe(32)
+        match_code = f"{secrets.randbelow(10000):04d}"
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            client = db.execute("""SELECT * FROM connections
+                WHERE client_id=? AND revoked_at IS NULL AND expires_at>?""",
+                (client_id, now)).fetchone()
+            if client is None or client["redirect_uri"] != redirect_uri:
+                raise ValueError("Invalid client or callback")
+            active = db.execute("""SELECT count(*) FROM pending_txns
+                WHERE status='pending' AND expires_at>?""", (now,)).fetchone()[0]
+            if active >= 5:
+                raise ValueError("Pending queue full")
+            db.execute("""INSERT INTO pending_txns
+                (txn_id,client_id,match_code,redirect_uri,state,code_challenge,
+                 scopes,created_at,expires_at)
+                VALUES(?,?,?,?,?,?,?,?,?)""",
+                (txn_id,client_id,match_code,redirect_uri,state,code_challenge,
+                 scopes,now,now+ttl))
+        return txn_id, match_code
+
+    def pending(self, now=None):
+        now = int(time.time()) if now is None else int(now)
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("""
+                SELECT t.txn_id,t.match_code,t.created_at,t.expires_at,
+                       c.platform_hint,c.client_name,c.client_id
+                FROM pending_txns t JOIN connections c USING(client_id)
+                WHERE t.status='pending' AND t.expires_at>?
+                ORDER BY t.created_at,t.txn_id""", (now,))]
+
+    def approve(self, txn_id, profile_id, now=None):
+        now = int(time.time()) if now is None else int(now)
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            profile = db.execute("SELECT 1 FROM profiles WHERE profile_id=? AND revoked_at IS NULL",
+                                 (profile_id,)).fetchone()
+            if profile is None:
+                raise ValueError("Unknown or revoked profile")
+            txn = db.execute("""SELECT t.client_id,c.profile_id,c.revoked_at,
+                                      c.expires_at
+                FROM pending_txns t JOIN connections c USING(client_id)
+                WHERE t.txn_id=?""", (txn_id,)).fetchone()
+            if txn is None or txn["revoked_at"] is not None or txn["expires_at"] <= now:
+                return False
+            if txn["profile_id"] not in (None, profile_id):
+                return False
+            updated = db.execute("""UPDATE pending_txns
+                SET status='approved',approved_profile=?
+                WHERE txn_id=? AND status='pending' AND expires_at>?""",
+                (profile_id,txn_id,now)).rowcount
+            if updated != 1:
+                return False
+            db.execute("""UPDATE connections SET profile_id=?
+                WHERE client_id=? AND (profile_id IS NULL OR profile_id=?)""",
+                (profile_id,txn["client_id"],profile_id))
+            return True
+
+    def deny(self, txn_id, now=None):
+        now = int(time.time()) if now is None else int(now)
+        with self.connect() as db:
+            return db.execute("""UPDATE pending_txns SET status='denied'
+                WHERE txn_id=? AND status='pending' AND expires_at>?""",
+                (txn_id,now)).rowcount == 1
+
+    def expire(self, now=None):
+        now = int(time.time()) if now is None else int(now)
+        with self.connect() as db:
+            return db.execute("""UPDATE pending_txns SET status='expired'
+                WHERE status='pending' AND expires_at<=?""", (now,)).rowcount
+
+    def revoke_connection(self, client_id, now=None):
+        now = int(time.time()) if now is None else int(now)
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            changed = db.execute("""UPDATE connections SET revoked_at=?
+                WHERE client_id=? AND revoked_at IS NULL""",(now,client_id)).rowcount
+            if changed:
+                db.execute("UPDATE access_tokens SET revoked_at=? WHERE client_id=? AND revoked_at IS NULL",(now,client_id))
+                db.execute("UPDATE refresh_tokens SET revoked_at=? WHERE client_id=? AND revoked_at IS NULL",(now,client_id))
+                db.execute("UPDATE pending_txns SET status='denied' WHERE client_id=? AND status='pending'",(client_id,))
+                db.execute("INSERT INTO revocations(target_type,target_id,created_at) VALUES('connection',?,?)",(client_id,now))
+            return changed == 1
+
+    def revoke_profile(self, profile_id, now=None):
+        now = int(time.time()) if now is None else int(now)
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            changed = db.execute("UPDATE profiles SET revoked_at=? WHERE profile_id=? AND revoked_at IS NULL",
+                                 (now,profile_id)).rowcount
+            if changed:
+                ids = [r[0] for r in db.execute("SELECT client_id FROM connections WHERE profile_id=?",(profile_id,))]
+                for cid in ids:
+                    db.execute("UPDATE connections SET revoked_at=? WHERE client_id=?",(now,cid))
+                    db.execute("UPDATE access_tokens SET revoked_at=? WHERE client_id=?",(now,cid))
+                    db.execute("UPDATE refresh_tokens SET revoked_at=? WHERE client_id=?",(now,cid))
+                    db.execute("UPDATE pending_txns SET status='denied' WHERE client_id=? AND status='pending'",(cid,))
+                db.execute("INSERT INTO revocations(target_type,target_id,created_at) VALUES('profile',?,?)",(profile_id,now))
+            return changed == 1
+
+    def backup(self, destination):
+        dest = Path(destination)
+        if dest.exists():
+            raise FileExistsError(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+        with self.connect() as source, sqlite3.connect(str(dest)) as target:
+            source.backup(target)
+        os.chmod(dest, 0o600)
