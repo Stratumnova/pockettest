@@ -218,8 +218,15 @@ class AuthStore:
         return dict(row) if self._client_row_valid(row, now) else None
 
     def create_pending(self, client_id, redirect_uri, state, code_challenge,
-                       scopes=None, ttl=180, now=None, resource=None,\n                       redirect_uri_provided_explicitly=True):
+                       scopes=None, ttl=180, now=None, resource=None,
+                       redirect_uri_provided_explicitly=True):
         now = int(time.time()) if now is None else int(now)
+        if resource is None:
+            resource = CANONICAL_RESOURCE
+        elif not isinstance(resource, str) or resource != CANONICAL_RESOURCE:
+            raise ValueError("Invalid resource")
+        if not isinstance(redirect_uri_provided_explicitly, bool):
+            raise ValueError("Invalid redirect flag")
         txn_id = secrets.token_urlsafe(32)
         match_code = f"{secrets.randbelow(10000):04d}"
         with self.connect() as db:
@@ -243,8 +250,8 @@ class AuthStore:
                 raise ValueError("Pending queue full")
             db.execute("""INSERT INTO pending_txns
                 (txn_id,client_id,match_code,redirect_uri,state,code_challenge,
-                 scopes,created_at,expires_at)
-                VALUES(?,?,?,?,?,?,?,?,?)""",
+                 scopes,created_at,expires_at,resource,redirect_uri_provided_explicitly)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                 (txn_id,client_id,match_code,redirect_uri,state,code_challenge,
                  resolved_scopes,now,now+ttl,resource,int(redirect_uri_provided_explicitly)))
         return txn_id, match_code
