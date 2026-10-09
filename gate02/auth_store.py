@@ -8,7 +8,7 @@ import re
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 PLATFORMS = frozenset(("claude", "chatgpt"))
 CLAUDE_CALLBACK = "https://claude.ai/api/mcp/auth_callback"
 CHATGPT_CALLBACK = re.compile(r"\Ahttps://chatgpt\.com/connector/oauth/[A-Za-z0-9_-]{1,64}\Z")
@@ -61,7 +61,7 @@ class AuthStore:
                     time.sleep(0.1)
             db.execute("BEGIN IMMEDIATE")
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, SCHEMA_VERSION):
+            if version not in (0, 1, 2, SCHEMA_VERSION):
                 raise RuntimeError(f"Unsupported auth schema version: {version}")
             schema = """
             CREATE TABLE IF NOT EXISTS profiles (
@@ -102,7 +102,9 @@ class AuthStore:
                 expires_at INTEGER NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending'
                     CHECK(status IN ('pending','approved','denied','expired','consumed')),
-                approved_profile TEXT REFERENCES profiles(profile_id)
+                approved_profile TEXT REFERENCES profiles(profile_id),
+                resource TEXT,
+                redirect_uri_provided_explicitly INTEGER
             );
             CREATE TABLE IF NOT EXISTS auth_codes (
                 code_hash TEXT PRIMARY KEY,
@@ -146,6 +148,11 @@ class AuthStore:
             columns = {row[1] for row in db.execute("PRAGMA table_info(connections)")}
             if "scope" not in columns:
                 db.execute("ALTER TABLE connections ADD COLUMN scope TEXT")
+            pending_columns = {row[1] for row in db.execute("PRAGMA table_info(pending_txns)")}
+            if "resource" not in pending_columns:
+                db.execute("ALTER TABLE pending_txns ADD COLUMN resource TEXT")
+            if "redirect_uri_provided_explicitly" not in pending_columns:
+                db.execute("ALTER TABLE pending_txns ADD COLUMN redirect_uri_provided_explicitly INTEGER")
             if version != SCHEMA_VERSION:
                 db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             if db.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
