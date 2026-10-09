@@ -95,11 +95,11 @@ def test_bound_connection_does_not_expire(store):
 def test_reject_future_schema_version(tmp_path):
     path = tmp_path / "future.sqlite3"
     with sqlite3.connect(path) as db:
-        db.execute("PRAGMA user_version=3")
+        db.execute("PRAGMA user_version=4")
     with pytest.raises(RuntimeError,match="Unsupported"):
         AuthStore(path)
     with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
 
 def test_code_lookup(store):
     txn,code = pending(store)
@@ -113,10 +113,10 @@ def test_platform_binding(store):
     assert not store.approve(txn,"owner/chatgpt",now=1001)
 
 
-def test_fresh_schema_v2(tmp_path):
+def test_fresh_schema_v3(tmp_path):
     store = AuthStore(tmp_path / "fresh.sqlite3")
     with store.connect() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
         assert "scope" in [r[1] for r in db.execute("PRAGMA table_info(connections)")]
 
 
@@ -135,7 +135,7 @@ def test_v1_migration_preserves_legacy_row(tmp_path):
         db.execute("PRAGMA user_version=1")
     migrated = AuthStore(path)
     with migrated.connect() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
         assert db.execute("SELECT scope FROM connections WHERE client_id='old'").fetchone()[0] is None
     assert migrated.get_registered_client("old", now=1001) is None
 
@@ -148,7 +148,7 @@ def test_concurrent_v1_migration(tmp_path):
     with ThreadPoolExecutor(max_workers=2) as pool:
         stores = list(pool.map(lambda _: AuthStore(path), range(2)))
     with stores[0].connect() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
         assert [r[1] for r in db.execute("PRAGMA table_info(connections)")].count("scope") == 1
 
 
@@ -211,3 +211,37 @@ def test_pending_rejects_sdk_scope_list_escalation(store):
     with pytest.raises(ValueError, match="scopes"):
         store.create_pending("client1", CALLBACK, "state", "challenge",
                              scopes=["roundtable.append", "vault.read"], now=1000)
+
+
+def test_fresh_v3_pending_resource_columns(tmp_path):
+    store = AuthStore(tmp_path / "v3.sqlite3")
+    with store.connect() as db:
+        columns = {r[1] for r in db.execute("PRAGMA table_info(pending_txns)")}
+        assert {"resource", "redirect_uri_provided_explicitly"}.issubset(columns)
+
+
+def test_v2_pending_row_migrates_with_null_resource(tmp_path):
+    path = tmp_path / "v2pending.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE connections (client_id TEXT PRIMARY KEY)")
+        db.execute("""CREATE TABLE pending_txns (
+            txn_id TEXT PRIMARY KEY, client_id TEXT, match_code TEXT,
+            redirect_uri TEXT, state TEXT, code_challenge TEXT, scopes TEXT,
+            created_at INTEGER, expires_at INTEGER, status TEXT,
+            approved_profile TEXT)""")
+        db.execute("INSERT INTO connections(client_id) VALUES ('legacy')")
+        db.execute("""INSERT INTO pending_txns
+            (txn_id,client_id,match_code,redirect_uri,state,code_challenge,
+             scopes,created_at,expires_at,status)
+            VALUES ('oldtxn','legacy','1234',?,'state','challenge',
+                    'roundtable.append',1000,1180,'approved')""", (CALLBACK,))
+        db.execute("PRAGMA user_version=2")
+    store = AuthStore(path)
+    with store.connect() as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        row = db.execute("""SELECT resource,redirect_uri_provided_explicitly,status
+                            FROM pending_txns WHERE txn_id='oldtxn'""").fetchone()
+        assert row["resource"] is None
+        assert row["redirect_uri_provided_explicitly"] is None
+        assert row["status"] == "approved"
+        assert db.execute("SELECT count(*) FROM auth_codes").fetchone()[0] == 0
