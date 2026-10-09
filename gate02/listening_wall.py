@@ -24,37 +24,40 @@ def _bounded(value):
 
 
 async def observe(kind, client_info=None, client_id=None):
-    record = {"at": datetime.now(timezone.utc).isoformat(), "kind": kind}
-    if client_info is not None:
-        record["fields"] = {}
-        for name in FIELDS:
-            value = getattr(client_info, name, None)
-            if value is not None:
-                record["fields"][name] = _bounded(value)
-    if client_id is not None:
-        try:
-            parts = urlsplit(str(client_id))
-            if parts.scheme == "https" and parts.hostname and not parts.username and not parts.password:
-                record["client_id"] = (f"https://{parts.hostname}" +
-                                       (f":{parts.port}" if parts.port else "") +
-                                       parts.path)[:300]
-            else:
-                record["client_id"] = "non-URL id"
-        except (ValueError, TypeError):
-            record["client_id"] = "non-URL id"
-    line = (json.dumps(record, ensure_ascii=True) + "\n").encode()
     try:
-        async with _lock:
-            fd = os.open(LOG_PATH, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        record = {"at": datetime.now(timezone.utc).isoformat(), "kind": kind}
+        if client_info is not None:
+            record["fields"] = {}
+            for name in FIELDS:
+                value = getattr(client_info, name, None)
+                if value is not None:
+                    record["fields"][name] = _bounded(value)
+        if client_id is not None:
             try:
-                os.fchmod(fd, 0o600)
-                if os.fstat(fd).st_size + len(line) <= LOG_MAX_BYTES:
-                    os.write(fd, line)
-            finally:
-                os.close(fd)
+                parts = urlsplit(str(client_id))
+                if parts.scheme == "https" and parts.hostname and not parts.username and not parts.password:
+                    record["client_id"] = (f"https://{parts.hostname}" +
+                                           (f":{parts.port}" if parts.port else "") +
+                                           parts.path)[:300]
+                else:
+                    record["client_id"] = "non-URL id"
+            except (ValueError, TypeError):
+                record["client_id"] = "non-URL id"
+        line = (json.dumps(record, ensure_ascii=True) + "\n").encode()
+        try:
+            async with _lock:
+                fd = os.open(LOG_PATH, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+                try:
+                    os.fchmod(fd, 0o600)
+                    if os.fstat(fd).st_size + len(line) <= LOG_MAX_BYTES:
+                        os.write(fd, line)
+                finally:
+                    os.close(fd)
+        except OSError:
+            pass  # Observation failure never changes deny-all decisions.
+    
     except Exception:
         pass  # Observation failure never changes deny-all decisions.
-
 
 class BodyLimitMiddleware:
     """Buffer selected HTTP bodies before calling app; reject oversized bodies."""
