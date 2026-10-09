@@ -54,8 +54,7 @@ class AuthStore:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version not in (0, 1, SCHEMA_VERSION):
                 raise RuntimeError(f"Unsupported auth schema version: {version}")
-            if version == 0:
-                schema = """
+            schema = """
             CREATE TABLE IF NOT EXISTS profiles (
                 profile_id TEXT PRIMARY KEY,
                 human_id TEXT NOT NULL,
@@ -132,10 +131,11 @@ class AuthStore:
                 created_at INTEGER NOT NULL
             );
                 """
-                for statement in schema.split(";"):
-                    if statement.strip():
-                        db.execute(statement)
-            elif version == 1:
+            for statement in schema.split(";"):
+                if statement.strip():
+                    db.execute(statement)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(connections)")}
+            if "scope" not in columns:
                 db.execute("ALTER TABLE connections ADD COLUMN scope TEXT")
             if version != SCHEMA_VERSION:
                 db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
