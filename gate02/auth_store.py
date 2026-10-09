@@ -173,6 +173,24 @@ class AuthStore:
                 (client_id, platform_hint, client_name, redirect_uri, now, now+ttl,
                  client_secret,auth_method,grant_types,response_types,issued_at,scope))
 
+    @staticmethod
+    def _client_row_valid(row, now):
+        """One fail-closed check shared by read and pending creation."""
+        if row is None or row["revoked_at"] is not None or row["profile_revoked"] is not None:
+            return False
+        if row["expires_at"] is not None and row["expires_at"] <= now:
+            return False
+        try:
+            if callback_platform(row["redirect_uri"]) != row["platform_hint"]:
+                return False
+        except (ValueError, TypeError):
+            return False
+        return (row["token_endpoint_auth_method"] == "client_secret_post"
+                and isinstance(row["client_secret"], str) and bool(row["client_secret"])
+                and row["grant_types"] == '["authorization_code","refresh_token"]'
+                and row["response_types"] == '["code"]'
+                and row["scope"] == "roundtable.append")
+
     def get_registered_client(self, client_id, now=None):
         """Return only well-formed, live, secret-authenticated clients."""
         now = int(time.time()) if now is None else int(now)
@@ -180,35 +198,25 @@ class AuthStore:
             row = db.execute("""SELECT c.*,p.revoked_at AS profile_revoked
                 FROM connections c LEFT JOIN profiles p ON p.profile_id=c.profile_id
                 WHERE c.client_id=?""", (client_id,)).fetchone()
-        if row is None or row["revoked_at"] is not None or row["profile_revoked"] is not None:
-            return None
-        if row["expires_at"] is not None and row["expires_at"] <= now:
-            return None
-        try:
-            if callback_platform(row["redirect_uri"]) != row["platform_hint"]:
-                return None
-        except (ValueError, TypeError):
-            return None
-        if (row["token_endpoint_auth_method"] != "client_secret_post"
-            or not isinstance(row["client_secret"], str) or not row["client_secret"]
-            or row["grant_types"] != '["authorization_code","refresh_token"]'
-            or row["response_types"] != '["code"]'
-            or row["scope"] != "roundtable.append"):
-            return None
-        return dict(row)
+        return dict(row) if self._client_row_valid(row, now) else None
 
     def create_pending(self, client_id, redirect_uri, state, code_challenge,
-                       scopes="roundtable.append", ttl=180, now=None):
+                       scopes=None, ttl=180, now=None):
         now = int(time.time()) if now is None else int(now)
         txn_id = secrets.token_urlsafe(32)
         match_code = f"{secrets.randbelow(10000):04d}"
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            client = db.execute("""SELECT * FROM connections
-                WHERE client_id=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)""",
-                (client_id, now)).fetchone()
-            if client is None or client["redirect_uri"] != redirect_uri:
+            client = db.execute("""SELECT c.*,p.revoked_at AS profile_revoked
+                FROM connections c LEFT JOIN profiles p ON p.profile_id=c.profile_id
+                WHERE c.client_id=?""", (client_id,)).fetchone()
+            if not self._client_row_valid(client, now) or client["redirect_uri"] != redirect_uri:
                 raise ValueError("Invalid client or callback")
+            registered = set(client["scope"].split())
+            requested = registered if scopes is None else set(scopes.split()) if isinstance(scopes, str) else set()
+            if not requested or not requested.issubset(registered) or not requested.issubset({"roundtable.append"}):
+                raise ValueError("Invalid requested scopes")
+            resolved_scopes = " ".join(sorted(requested))
             active = db.execute("""SELECT count(*) FROM pending_txns
                 WHERE status='pending' AND expires_at>?""", (now,)).fetchone()[0]
             if active >= 5:
@@ -218,14 +226,14 @@ class AuthStore:
                  scopes,created_at,expires_at)
                 VALUES(?,?,?,?,?,?,?,?,?)""",
                 (txn_id,client_id,match_code,redirect_uri,state,code_challenge,
-                 scopes,now,now+ttl))
+                 resolved_scopes,now,now+ttl))
         return txn_id, match_code
 
     def pending(self, now=None):
         now = int(time.time()) if now is None else int(now)
         with self.connect() as db:
             return [dict(row) for row in db.execute("""
-                SELECT t.txn_id,t.match_code,t.created_at,t.expires_at,
+                SELECT t.txn_id,t.match_code,t.created_at,t.expires_at,t.scopes,
                        c.platform_hint,c.client_name,c.client_id
                 FROM pending_txns t JOIN connections c USING(client_id)
                 WHERE t.status='pending' AND t.expires_at>?
