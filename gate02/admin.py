@@ -32,7 +32,7 @@ def main(argv=None):
 def _execute(args, store):
     if args.action == "pending":
         for txn in store.pending():
-            print(f"{txn['txn_id']}  {txn['match_code']}  {txn['platform_hint']}  {txn['client_name']}  {txn['created_at']}")
+            print(f"{txn['txn_id']}  {txn['match_code']}  {txn['platform_hint']}  {txn['client_name']}  scopes={txn['scopes']}  {txn['created_at']}")
     elif args.action == "create-profile":
         print(store.create_profile(args.human,args.platform))
     elif args.action == "approve":
