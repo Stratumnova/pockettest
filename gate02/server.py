@@ -1,6 +1,6 @@
-"""Gate-02A: local-only, deny-all OAuth skeleton.
+"""Gate-02A: public, deny-all OAuth skeleton.
 
-A5-prep observation experiment: publicly reachable, deny-all.
+A5-prep observation complete; registration and observation disabled.
 Do not grant access to private files.
 """
 
@@ -15,7 +15,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import AnyHttpUrl
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from listening_wall import BodyLimitMiddleware, observe
+from listening_wall import BodyLimitMiddleware
 
 PUBLIC_ORIGIN = "https://roundtable.rodsrcpark.com"
 RESOURCE_URL = PUBLIC_ORIGIN + "/mcp"
@@ -25,11 +25,9 @@ class DenyAllProvider(OAuthAuthorizationServerProvider):
     """Fail closed: no clients, authorization codes, or tokens."""
 
     async def get_client(self, client_id):
-        await observe("get_client", client_id=client_id)
         return None
 
     async def register_client(self, client_info):
-        await observe("register_client", client_info=client_info)
         raise RegistrationError(error="invalid_client_metadata", error_description="Registration disabled in Gate-02A")
 
     async def authorize(self, client, params):
@@ -61,7 +59,7 @@ mcp = FastMCP(
     auth=AuthSettings(
         issuer_url=AnyHttpUrl(PUBLIC_ORIGIN),
         resource_server_url=AnyHttpUrl(RESOURCE_URL),
-        client_registration_options=ClientRegistrationOptions(enabled=True),
+        client_registration_options=ClientRegistrationOptions(enabled=False),
         revocation_options=RevocationOptions(enabled=True),
     ),
     transport_security=TransportSecuritySettings(
