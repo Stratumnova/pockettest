@@ -25,7 +25,7 @@ def adapter(tmp_path):
 def params(**changes):
     values = dict(
         redirect_uri=CALLBACK, state="opaque-state",
-        code_challenge="pkce-challenge", scopes=["roundtable.append"],
+        code_challenge="A" * 43, scopes=["roundtable.append"],
         resource=None, redirect_uri_provided_explicitly=True,
     )
     values.update(changes)
@@ -50,7 +50,7 @@ def test_authorize_preserves_sdk_flag_and_returns_safe_url(adapter, explicit):
     assert row["resource"] == CANONICAL_RESOURCE
     assert row["redirect_uri"] == CALLBACK
     assert row["state"] == "opaque-state"
-    assert row["code_challenge"] == "pkce-challenge"
+    assert row["code_challenge"] == "A" * 43
     assert row["match_code"] not in url
 
 
@@ -88,3 +88,17 @@ def test_absent_state_attribute_rejected(adapter):
     with pytest.raises(AuthorizeError):
         asyncio.run(adapter.authorize(SimpleNamespace(client_id="sdk-client"), p))
     assert adapter.auth_store.pending() == []
+
+
+@pytest.mark.parametrize("challenge", ["", "A" * 42, "A" * 44, "+" + "A" * 42, "/" + "A" * 42])
+def test_invalid_pkce_challenge_rejected(adapter, challenge):
+    with pytest.raises(AuthorizeError):
+        asyncio.run(adapter.authorize(
+            SimpleNamespace(client_id="sdk-client"), params(code_challenge=challenge)))
+    assert adapter.auth_store.pending() == []
+
+
+def test_valid_pkce_challenge_accepted(adapter):
+    url = asyncio.run(adapter.authorize(
+        SimpleNamespace(client_id="sdk-client"), params(code_challenge="aZ09_-" + "A" * 37)))
+    assert url.startswith("https://roundtable.rodsrcpark.com/consent/")
