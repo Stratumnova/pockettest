@@ -1,4 +1,5 @@
 """C3 authorize-only contract tests. No server or network."""
+import asyncio
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 import pytest
@@ -31,13 +32,12 @@ def params(**changes):
     return SimpleNamespace(**values)
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("explicit", [True, False])
-async def test_authorize_preserves_sdk_flag_and_returns_safe_url(adapter, explicit):
-    url = await adapter.authorize(
+def test_authorize_preserves_sdk_flag_and_returns_safe_url(adapter, explicit):
+    url = asyncio.run(adapter.authorize(
         SimpleNamespace(client_id="sdk-client"),
         params(redirect_uri_provided_explicitly=explicit),
-    )
+    ))
     parsed = urlsplit(url)
     assert parsed.scheme == "https"
     assert parsed.netloc == "roundtable.rodsrcpark.com"
@@ -54,33 +54,29 @@ async def test_authorize_preserves_sdk_flag_and_returns_safe_url(adapter, explic
     assert row["match_code"] not in url
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("state", [None, ""])
-async def test_missing_or_empty_state_rejected(adapter, state):
+def test_missing_or_empty_state_rejected(adapter, state):
     with pytest.raises(AuthorizeError):
-        await adapter.authorize(SimpleNamespace(client_id="sdk-client"), params(state=state))
+        asyncio.run(adapter.authorize(SimpleNamespace(client_id="sdk-client"), params(state=state)))
     assert adapter.auth_store.pending() == []
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("resource", ["https://evil.example/mcp", CANONICAL_RESOURCE + "/"])
-async def test_foreign_or_near_miss_resource_rejected(adapter, resource):
+def test_foreign_or_near_miss_resource_rejected(adapter, resource):
     with pytest.raises(AuthorizeError):
-        await adapter.authorize(SimpleNamespace(client_id="sdk-client"), params(resource=resource))
+        asyncio.run(adapter.authorize(SimpleNamespace(client_id="sdk-client"), params(resource=resource)))
     assert adapter.auth_store.pending() == []
 
 
-@pytest.mark.asyncio
-async def test_callback_mismatch_rejected(adapter):
+def test_callback_mismatch_rejected(adapter):
     with pytest.raises(AuthorizeError):
-        await adapter.authorize(SimpleNamespace(client_id="sdk-client"), params(redirect_uri="https://evil.example/cb"))
+        asyncio.run(adapter.authorize(SimpleNamespace(client_id="sdk-client"), params(redirect_uri="https://evil.example/cb")))
     assert adapter.auth_store.pending() == []
 
 
-@pytest.mark.asyncio
-async def test_redirect_uri_string_conversion(adapter):
+def test_redirect_uri_string_conversion(adapter):
     class URI:
         def __str__(self):
             return CALLBACK
-    url = await adapter.authorize(SimpleNamespace(client_id="sdk-client"), params(redirect_uri=URI()))
+    url = asyncio.run(adapter.authorize(SimpleNamespace(client_id="sdk-client"), params(redirect_uri=URI())))
     assert url.startswith("https://roundtable.rodsrcpark.com/consent/")
