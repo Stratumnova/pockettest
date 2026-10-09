@@ -15,7 +15,7 @@ def client(callback=CLAUDE, **overrides):
         redirect_uris=[callback], grant_types=["authorization_code","refresh_token"],
         response_types=["code"], token_endpoint_auth_method="client_secret_post",
         client_name="Untrusted Display Name",client_id_issued_at=1000,
-        client_secret_expires_at=0)
+        client_secret_expires_at=0,scope="roundtable.append")
     values.update(overrides)
     return OAuthClientInformationFull(**values)
 
@@ -97,3 +97,22 @@ def test_sqlite_check_rejects_secretless_secret_post(provider):
                 (client_id,platform_hint,client_name,redirect_uri,created_at,expires_at,
                  token_endpoint_auth_method,client_secret)
                 VALUES ('bad','claude','bad',?,1000,2000,'client_secret_post',NULL)""",(CLAUDE,))
+
+
+def test_missing_scope_rejected_at_provider(provider):
+    with pytest.raises(RegistrationError) as err:
+        asyncio.run(provider.register_client(client(scope=None)))
+    assert err.value.error == "invalid_client_metadata"
+
+def test_scope_roundtrip(provider):
+    asyncio.run(provider.register_client(client()))
+    returned = asyncio.run(provider.get_client("sdk-issued-id"))
+    assert returned.scope == "roundtable.append"
+    with provider.auth_store.connect() as db:
+        db.execute("UPDATE connections SET scope=NULL")
+    assert asyncio.run(provider.get_client("sdk-issued-id")) is None
+
+def test_disallowed_scope_rejected(provider):
+    with pytest.raises(RegistrationError) as err:
+        asyncio.run(provider.register_client(client(scope="vault.read")))
+    assert err.value.error == "invalid_client_metadata"
