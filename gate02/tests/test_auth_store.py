@@ -10,7 +10,10 @@ CALLBACK = "https://claude.ai/api/mcp/auth_callback"
 def store(tmp_path):
     s = AuthStore(tmp_path / "auth.sqlite3")
     s.create_profile("owner","claude")
-    s.register_connection("client1","claude","Claude",CALLBACK,now=1000)
+    s.register_connection("client1","claude","Claude",CALLBACK,now=1000,
+        client_secret="fixture-secret",auth_method="client_secret_post",
+        grant_types='["authorization_code","refresh_token"]',
+        response_types='["code"]',scope="roundtable.append")
     return s
 
 def pending(s, now=1000, ttl=180):
@@ -92,11 +95,11 @@ def test_bound_connection_does_not_expire(store):
 def test_reject_future_schema_version(tmp_path):
     path = tmp_path / "future.sqlite3"
     with sqlite3.connect(path) as db:
-        db.execute("PRAGMA user_version=2")
+        db.execute("PRAGMA user_version=3")
     with pytest.raises(RuntimeError,match="Unsupported"):
         AuthStore(path)
     with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
 
 def test_code_lookup(store):
     txn,code = pending(store)
