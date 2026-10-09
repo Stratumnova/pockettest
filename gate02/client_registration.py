@@ -1,69 +1,73 @@
-"""Gate-02A C2: offline dynamic-client-registration policy.
+"""C2 MCP SDK registration provider mixin; NOT mounted on public server.
 
-This module is NOT mounted in server.py. Public DCR stays disabled.
-Client metadata is untrusted; callback allowlisting does not prove identity.
+The SDK issues client_id/client_secret and calls register_client(client_info).
+Owner approval and token issuance remain separate future milestones.
 """
-import secrets
+import json
 import time
+from mcp.shared.auth import OAuthClientInformationFull
 from auth_store import callback_platform
 
 ALLOWED_GRANTS = frozenset(("authorization_code", "refresh_token"))
-ALLOWED_RESPONSES = frozenset(("code",))
-ALLOWED_AUTH_METHODS = frozenset(("client_secret_post", "none"))
 MAX_NAME_LENGTH = 120
 
 class RegistrationError(ValueError):
     pass
 
-def _strings(value, field):
-    if not isinstance(value, list) or not value or any(not isinstance(x,str) for x in value):
-        raise RegistrationError(f"Invalid {field}")
-    if len(value) != len(set(value)):
-        raise RegistrationError(f"Duplicate {field}")
-    return frozenset(value)
-
-def validate_metadata(metadata):
-    if not isinstance(metadata, dict):
-        raise RegistrationError("Expected JSON object")
-    uris = metadata.get("redirect_uris")
-    if not isinstance(uris, list) or len(uris) != 1 or not isinstance(uris[0], str):
-        raise RegistrationError("Exactly one redirect URI required")
+def validate_client(client):
+    """Validate the actual SDK client model, not a parallel metadata format."""
+    uris = [str(u) for u in client.redirect_uris]
+    if len(uris) != 1:
+        raise RegistrationError("Exactly one callback required")
     try:
         platform = callback_platform(uris[0])
     except ValueError as exc:
         raise RegistrationError("Callback not allowlisted") from exc
-    grants = _strings(metadata.get("grant_types", ["authorization_code"]), "grant_types")
-    responses = _strings(metadata.get("response_types", ["code"]), "response_types")
-    if not grants.issubset(ALLOWED_GRANTS) or "authorization_code" not in grants:
-        raise RegistrationError("Unsupported grant type")
-    if responses != ALLOWED_RESPONSES:
-        raise RegistrationError("Unsupported response type")
-    method = metadata.get("token_endpoint_auth_method", "client_secret_post")
-    if method not in ALLOWED_AUTH_METHODS:
-        raise RegistrationError("Unsupported client auth method")
-    name = metadata.get("client_name", platform)
-    if not isinstance(name,str) or not (1 <= len(name) <= MAX_NAME_LENGTH):
+    if client.token_endpoint_auth_method != "client_secret_post":
+        raise RegistrationError("Only client_secret_post is supported")
+    if not isinstance(client.client_secret, str) or not client.client_secret:
+        raise RegistrationError("Nonempty client secret required")
+    grants = set(client.grant_types or [])
+    if grants != ALLOWED_GRANTS:
+        raise RegistrationError("Expected authorization_code and refresh_token")
+    if list(client.response_types or []) != ["code"]:
+        raise RegistrationError("Expected code response")
+    name = client.client_name or platform
+    if not isinstance(name, str) or not 1 <= len(name) <= MAX_NAME_LENGTH:
         raise RegistrationError("Invalid client name")
-    # Client name is display-only, never an identity signal.
-    for field in ("jwks_uri", "jwks", "software_statement", "sector_identifier_uri"):
-        if field in metadata:
-            raise RegistrationError(f"Unsupported registration field: {field}")
-    return {"platform":platform,"redirect_uri":uris[0],
-            "client_name":name,"grant_types":sorted(grants),
-            "response_types":["code"],"token_endpoint_auth_method":method}
+    if not client.client_id:
+        raise RegistrationError("Missing SDK-issued client ID")
+    return platform, uris[0], name
 
-def register_offline(store, metadata, now=None, ttl=900):
-    """Persist unbound client; no network endpoint or issued access tokens."""
-    now = int(time.time()) if now is None else int(now)
-    if ttl <= 0 or ttl > 900:
-        raise RegistrationError("Invalid unbound registration TTL")
-    validated = validate_metadata(metadata)
-    client_id = secrets.token_urlsafe(32)
-    store.register_connection(client_id,validated["platform"],validated["client_name"],
-                              validated["redirect_uri"],ttl=ttl,now=now)
-    return {"client_id":client_id,"client_id_issued_at":now,
-            "client_secret":None,"client_name":validated["client_name"],
-            "redirect_uris":[validated["redirect_uri"]],
-            "grant_types":validated["grant_types"],
-            "response_types":validated["response_types"],
-            "token_endpoint_auth_method":validated["token_endpoint_auth_method"]}
+class C2ClientRegistration:
+    """Mixin for the eventual OAuthAuthorizationServerProvider implementation."""
+    def __init__(self, auth_store):
+        self.auth_store = auth_store
+
+    async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        platform, callback, name = validate_client(client_info)
+        self.auth_store.register_connection(
+            client_id=client_info.client_id,
+            platform_hint=platform, client_name=name, redirect_uri=callback,
+            client_secret=client_info.client_secret,
+            auth_method="client_secret_post",
+            grant_types='["authorization_code","refresh_token"]',
+            response_types='["code"]',
+            issued_at=client_info.client_id_issued_at,
+            ttl=900)
+
+    async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
+        row = self.auth_store.get_registered_client(client_id)
+        if row is None:
+            return None
+        # Only reconstruct fully authenticated clients; never return missing secrets.
+        return OAuthClientInformationFull(
+            client_id=row["client_id"],
+            client_secret=row["client_secret"],
+            client_id_issued_at=row["client_id_issued_at"] or row["created_at"],
+            client_secret_expires_at=0,
+            redirect_uris=[row["redirect_uri"]],
+            grant_types=["authorization_code", "refresh_token"],
+            response_types=["code"],
+            token_endpoint_auth_method="client_secret_post",
+            client_name=row["client_name"])
