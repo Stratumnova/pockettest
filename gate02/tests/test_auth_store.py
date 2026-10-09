@@ -245,3 +245,40 @@ def test_v2_pending_row_migrates_with_null_resource(tmp_path):
         assert row["redirect_uri_provided_explicitly"] is None
         assert row["status"] == "approved"
         assert db.execute("SELECT count(*) FROM auth_codes").fetchone()[0] == 0
+
+
+CANONICAL_RESOURCE = "https://roundtable.rodsrcpark.com/mcp"
+
+
+@pytest.mark.parametrize("resource", [None, CANONICAL_RESOURCE])
+@pytest.mark.parametrize("explicit", [True, False])
+def test_pending_canonical_resource_and_explicit_flag(store, resource, explicit):
+    txn, _ = store.create_pending("client1", CALLBACK, "state", "challenge",
+                                  resource=resource,
+                                  redirect_uri_provided_explicitly=explicit, now=1000)
+    with store.connect() as db:
+        row = db.execute("""SELECT resource,redirect_uri_provided_explicitly
+                            FROM pending_txns WHERE txn_id=?""", (txn,)).fetchone()
+    assert row["resource"] == CANONICAL_RESOURCE
+    assert row["redirect_uri_provided_explicitly"] == int(explicit)
+
+
+@pytest.mark.parametrize("resource", [
+    "https://other.example/mcp",
+    "https://roundtable.rodsrcpark.com/mcp/",
+    "",
+    "https://roundtable.rodsrcpark.com",
+])
+def test_pending_rejects_noncanonical_resource(store, resource):
+    with pytest.raises(ValueError, match="resource"):
+        store.create_pending("client1", CALLBACK, "state", "challenge",
+                             resource=resource, now=1000)
+    assert store.pending(now=1001) == []
+
+
+@pytest.mark.parametrize("flag", [None, 0, 1, "true"])
+def test_pending_rejects_invalid_redirect_flag(store, flag):
+    with pytest.raises(ValueError, match="flag"):
+        store.create_pending("client1", CALLBACK, "state", "challenge",
+                             redirect_uri_provided_explicitly=flag, now=1000)
+    assert store.pending(now=1001) == []
