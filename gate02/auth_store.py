@@ -192,7 +192,8 @@ class AuthStore:
         if (row["token_endpoint_auth_method"] != "client_secret_post"
             or not isinstance(row["client_secret"], str) or not row["client_secret"]
             or row["grant_types"] != '["authorization_code","refresh_token"]'
-            or row["response_types"] != '["code"]'):
+            or row["response_types"] != '["code"]'
+            or row["scope"] != "roundtable.append"):
             return None
         return dict(row)
 
