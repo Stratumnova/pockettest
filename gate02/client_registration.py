@@ -9,6 +9,15 @@ from auth_store import callback_platform
 
 ALLOWED_GRANTS = frozenset(("authorization_code", "refresh_token"))
 MAX_NAME_LENGTH = 120
+ALLOWED_SCOPES = frozenset(("roundtable.append",))
+
+def normalized_scope(value):
+    if not isinstance(value, str):
+        raise RegistrationError("invalid_client_metadata", "Registered scope required")
+    scopes = value.split()
+    if not scopes or not set(scopes).issubset(ALLOWED_SCOPES):
+        raise RegistrationError("invalid_client_metadata", "Registered scope not allowed")
+    return " ".join(sorted(set(scopes)))
 
 def validate_client(client):
     """Validate the actual SDK client model, not a parallel metadata format."""
@@ -42,6 +51,7 @@ class C2ClientRegistration:
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         platform, callback, name = validate_client(client_info)
+        scope = normalized_scope(client_info.scope)
         try:
             self.auth_store.register_connection(
             client_id=client_info.client_id,
@@ -51,6 +61,7 @@ class C2ClientRegistration:
             grant_types='["authorization_code","refresh_token"]',
             response_types='["code"]',
             issued_at=client_info.client_id_issued_at,
+            scope=scope,
             ttl=900)
         except ValueError as exc:
             raise RegistrationError("invalid_client_metadata", "Client registration rejected") from exc
@@ -69,4 +80,5 @@ class C2ClientRegistration:
             grant_types=["authorization_code", "refresh_token"],
             response_types=["code"],
             token_endpoint_auth_method="client_secret_post",
-            client_name=row["client_name"])
+            client_name=row["client_name"],
+            scope=row["scope"])
