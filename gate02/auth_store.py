@@ -8,7 +8,7 @@ import re
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PLATFORMS = frozenset(("claude", "chatgpt"))
 CLAUDE_CALLBACK = "https://claude.ai/api/mcp/auth_callback"
 CHATGPT_CALLBACK = re.compile(r"\Ahttps://chatgpt\.com/connector/oauth/[A-Za-z0-9_-]{1,64}\Z")
@@ -50,10 +50,12 @@ class AuthStore:
         os.chmod(self.path, 0o600)
         with self.connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
+            db.execute("BEGIN IMMEDIATE")
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, SCHEMA_VERSION):
+            if version not in (0, 1, SCHEMA_VERSION):
                 raise RuntimeError(f"Unsupported auth schema version: {version}")
-            db.executescript("""
+            if version == 0:
+                schema = """
             CREATE TABLE IF NOT EXISTS profiles (
                 profile_id TEXT PRIMARY KEY,
                 human_id TEXT NOT NULL,
@@ -75,6 +77,7 @@ class AuthStore:
                 grant_types TEXT,
                 response_types TEXT,
                 client_id_issued_at INTEGER,
+                scope TEXT,
                 CHECK(token_endpoint_auth_method IS NULL OR
                       (token_endpoint_auth_method='client_secret_post' AND
                        client_secret IS NOT NULL AND length(client_secret)>0))
@@ -128,8 +131,13 @@ class AuthStore:
                 target_id TEXT NOT NULL,
                 created_at INTEGER NOT NULL
             );
-            """)
-            if version == 0:
+                """
+                for statement in schema.split(";"):
+                    if statement.strip():
+                        db.execute(statement)
+            elif version == 1:
+                db.execute("ALTER TABLE connections ADD COLUMN scope TEXT")
+            if version != SCHEMA_VERSION:
                 db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             if db.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
                 raise RuntimeError("Unsupported auth schema")
@@ -143,7 +151,7 @@ class AuthStore:
 
     def register_connection(self, client_id, platform_hint, client_name, redirect_uri,
                             ttl=900, now=None, client_secret=None, auth_method=None,
-                            grant_types=None, response_types=None, issued_at=None):
+                            grant_types=None, response_types=None, issued_at=None, scope=None):
         now = int(time.time()) if now is None else int(now)
         if platform_hint not in PLATFORMS or callback_platform(redirect_uri) != platform_hint:
             raise ValueError("Invalid platform or callback")
@@ -160,10 +168,10 @@ class AuthStore:
                 raise ValueError("Unbound registration queue full")
             db.execute("""INSERT INTO connections
                 (client_id,platform_hint,client_name,redirect_uri,created_at,expires_at,
-                 client_secret,token_endpoint_auth_method,grant_types,response_types,client_id_issued_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                 client_secret,token_endpoint_auth_method,grant_types,response_types,client_id_issued_at,scope)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (client_id, platform_hint, client_name, redirect_uri, now, now+ttl,
-                 client_secret,auth_method,grant_types,response_types,issued_at))
+                 client_secret,auth_method,grant_types,response_types,issued_at,scope))
 
     def get_registered_client(self, client_id, now=None):
         """Return only well-formed, live, secret-authenticated clients."""
