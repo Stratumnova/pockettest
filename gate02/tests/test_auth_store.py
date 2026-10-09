@@ -150,3 +150,45 @@ def test_concurrent_v1_migration(tmp_path):
     with stores[0].connect() as db:
         assert db.execute("PRAGMA user_version").fetchone()[0] == 2
         assert [r[1] for r in db.execute("PRAGMA table_info(connections)")].count("scope") == 1
+
+
+def test_pending_scopes_resolved_and_visible(store):
+    txn, _ = store.create_pending("client1", CALLBACK, "state", "challenge", scopes=None, now=1000)
+    row = store.pending(now=1001)[0]
+    assert row["txn_id"] == txn
+    assert row["scopes"] == "roundtable.append"
+    with store.connect() as db:
+        assert db.execute("SELECT scopes FROM pending_txns WHERE txn_id=?", (txn,)).fetchone()[0] == "roundtable.append"
+
+
+@pytest.mark.parametrize("scopes", ["vault.read", "roundtable.append vault.read", "", " ", 123])
+def test_pending_rejects_invalid_scopes(store, scopes):
+    with pytest.raises(ValueError, match="scopes"):
+        store.create_pending("client1", CALLBACK, "state", "challenge", scopes=scopes, now=1000)
+    assert store.pending(now=1001) == []
+
+
+@pytest.mark.parametrize("column,value", [
+    ("scope", None),
+    ("scope", "vault.read"),
+    ("token_endpoint_auth_method", None),
+    ("grant_types", "[]"),
+    ("response_types", "[]"),
+    ("client_secret", None),
+])
+def test_pending_rejects_invalid_registered_client(store, column, value):
+    with store.connect() as db:
+        db.execute(f"UPDATE connections SET {column}=? WHERE client_id='client1'", (value,))
+    assert store.get_registered_client("client1", now=1000) is None
+    with pytest.raises(ValueError, match="Invalid client"):
+        pending(store)
+
+
+def test_pending_rejects_revoked_bound_profile(store):
+    txn, _ = pending(store)
+    assert store.approve(txn, "owner/claude", now=1001)
+    with store.connect() as db:
+        db.execute("UPDATE profiles SET revoked_at=1002 WHERE profile_id='owner/claude'")
+    assert store.get_registered_client("client1", now=1003) is None
+    with pytest.raises(ValueError, match="Invalid client"):
+        pending(store, now=1003)
