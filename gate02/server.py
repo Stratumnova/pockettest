@@ -1,7 +1,7 @@
 """Gate-02A: local-only, deny-all OAuth skeleton.
 
-This is a review candidate, NOT a working authorization server.
-Do not connect a public tunnel or grant access to private files.
+A5-prep observation experiment: publicly reachable, deny-all.
+Do not grant access to private files.
 """
 
 from mcp.server.auth.provider import (OAuthAuthorizationServerProvider, RegistrationError, AuthorizeError, TokenError)
@@ -85,10 +85,11 @@ async def health(request: Request):
     return JSONResponse({"status": "gate02a-deny-all", "ready": False})
 
 
-app = BodyLimitMiddleware(mcp.streamable_http_app())
+starlette_app = mcp.streamable_http_app()
+app = BodyLimitMiddleware(starlette_app)
 
 
 if __name__ == "__main__":
     # Inspection only. Do not start the server by running this file.
-    for route in app.routes:
+    for route in starlette_app.routes:
         print(getattr(route, "path", "<mount>"))
