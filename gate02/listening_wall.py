@@ -52,7 +52,7 @@ async def observe(kind, client_info=None, client_id=None):
                     os.write(fd, line)
             finally:
                 os.close(fd)
-    except OSError:
+    except Exception:
         pass  # Observation failure never changes deny-all decisions.
 
 
