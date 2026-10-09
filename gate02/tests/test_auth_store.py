@@ -174,7 +174,6 @@ def test_pending_rejects_invalid_scopes(store, scopes):
     ("token_endpoint_auth_method", None),
     ("grant_types", "[]"),
     ("response_types", "[]"),
-    ("client_secret", None),
 ])
 def test_pending_rejects_invalid_registered_client(store, column, value):
     with store.connect() as db:
@@ -192,3 +191,23 @@ def test_pending_rejects_revoked_bound_profile(store):
     assert store.get_registered_client("client1", now=1003) is None
     with pytest.raises(ValueError, match="Invalid client"):
         pending(store, now=1003)
+
+
+def test_db_refuses_secretless_secret_post_update(store):
+    with store.connect() as db:
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute("UPDATE connections SET client_secret=NULL WHERE client_id='client1'")
+    assert store.get_registered_client("client1", now=1000) is not None
+
+
+def test_pending_accepts_sdk_scope_list(store):
+    txn, _ = store.create_pending("client1", CALLBACK, "state", "challenge",
+                                  scopes=["roundtable.append"], now=1000)
+    assert store.pending(now=1001)[0]["scopes"] == "roundtable.append"
+    assert store.pending(now=1001)[0]["txn_id"] == txn
+
+
+def test_pending_rejects_sdk_scope_list_escalation(store):
+    with pytest.raises(ValueError, match="scopes"):
+        store.create_pending("client1", CALLBACK, "state", "challenge",
+                             scopes=["roundtable.append", "vault.read"], now=1000)
