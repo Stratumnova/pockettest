@@ -11,7 +11,7 @@ from pathlib import Path
 SCHEMA_VERSION = 1
 PLATFORMS = frozenset(("claude", "chatgpt"))
 CLAUDE_CALLBACK = "https://claude.ai/api/mcp/auth_callback"
-CHATGPT_CALLBACK = re.compile(r"\\Ahttps://chatgpt\\.com/connector/oauth/[A-Za-z0-9_-]{1,64}\\Z")
+CHATGPT_CALLBACK = re.compile(r"\Ahttps://chatgpt\.com/connector/oauth/[A-Za-z0-9_-]{1,64}\Z")
 
 
 def callback_platform(uri):
@@ -69,7 +69,15 @@ class AuthStore:
                 profile_id TEXT REFERENCES profiles(profile_id),
                 created_at INTEGER NOT NULL,
                 expires_at INTEGER,
-                revoked_at INTEGER
+                revoked_at INTEGER,
+                client_secret TEXT,
+                token_endpoint_auth_method TEXT,
+                grant_types TEXT,
+                response_types TEXT,
+                client_id_issued_at INTEGER,
+                CHECK(token_endpoint_auth_method IS NULL OR
+                      (token_endpoint_auth_method='client_secret_post' AND
+                       client_secret IS NOT NULL AND length(client_secret)>0))
             );
             CREATE TABLE IF NOT EXISTS pending_txns (
                 txn_id TEXT PRIMARY KEY,
@@ -134,12 +142,16 @@ class AuthStore:
         return profile_id
 
     def register_connection(self, client_id, platform_hint, client_name, redirect_uri,
-                            ttl=900, now=None):
+                            ttl=900, now=None, client_secret=None, auth_method=None,
+                            grant_types=None, response_types=None, issued_at=None):
         now = int(time.time()) if now is None else int(now)
         if platform_hint not in PLATFORMS or callback_platform(redirect_uri) != platform_hint:
             raise ValueError("Invalid platform or callback")
         if not client_id or ttl <= 0:
             raise ValueError("Invalid registration")
+        if auth_method is not None and (auth_method != "client_secret_post" or
+                                        not isinstance(client_secret, str) or not client_secret):
+            raise ValueError("Secret-based registration requires a nonempty secret")
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             count = db.execute("""SELECT count(*) FROM connections WHERE profile_id IS NULL
@@ -147,9 +159,34 @@ class AuthStore:
             if count >= 5:
                 raise ValueError("Unbound registration queue full")
             db.execute("""INSERT INTO connections
-                (client_id,platform_hint,client_name,redirect_uri,created_at,expires_at)
-                VALUES(?,?,?,?,?,?)""",
-                (client_id, platform_hint, client_name, redirect_uri, now, now+ttl))
+                (client_id,platform_hint,client_name,redirect_uri,created_at,expires_at,
+                 client_secret,token_endpoint_auth_method,grant_types,response_types,client_id_issued_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (client_id, platform_hint, client_name, redirect_uri, now, now+ttl,
+                 client_secret,auth_method,grant_types,response_types,issued_at))
+
+    def get_registered_client(self, client_id, now=None):
+        """Return only well-formed, live, secret-authenticated clients."""
+        now = int(time.time()) if now is None else int(now)
+        with self.connect() as db:
+            row = db.execute("""SELECT c.*,p.revoked_at AS profile_revoked
+                FROM connections c LEFT JOIN profiles p ON p.profile_id=c.profile_id
+                WHERE c.client_id=?""", (client_id,)).fetchone()
+        if row is None or row["revoked_at"] is not None or row["profile_revoked"] is not None:
+            return None
+        if row["expires_at"] is not None and row["expires_at"] <= now:
+            return None
+        try:
+            if callback_platform(row["redirect_uri"]) != row["platform_hint"]:
+                return None
+        except (ValueError, TypeError):
+            return None
+        if (row["token_endpoint_auth_method"] != "client_secret_post"
+            or not isinstance(row["client_secret"], str) or not row["client_secret"]
+            or row["grant_types"] != '["authorization_code","refresh_token"]'
+            or row["response_types"] != '["code"]'):
+            return None
+        return dict(row)
 
     def create_pending(self, client_id, redirect_uri, state, code_challenge,
                        scopes="roundtable.append", ttl=180, now=None):
