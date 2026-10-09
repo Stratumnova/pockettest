@@ -1,4 +1,5 @@
 """C3 development-only OAuth authorize adapter; not mounted on public server."""
+import re
 from mcp.server.auth.provider import AuthorizeError
 from client_registration import C2ClientRegistration
 
@@ -12,6 +13,9 @@ class C3AuthorizeProvider(C2ClientRegistration):
         state = getattr(params, "state", None)
         if not isinstance(state, str) or not state:
             raise AuthorizeError(error="invalid_request", error_description="Nonempty state required")
+
+        if re.fullmatch(r"[A-Za-z0-9_-]{43}", params.code_challenge) is None:
+            raise AuthorizeError(error="invalid_request", error_description="Invalid PKCE challenge")
 
         redirect_uri = str(params.redirect_uri)
         explicitly = params.redirect_uri_provided_explicitly
