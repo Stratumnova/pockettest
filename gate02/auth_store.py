@@ -4,6 +4,7 @@ import os
 import secrets
 import sqlite3
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 SCHEMA_VERSION = 1
@@ -17,12 +18,17 @@ class AuthStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init()
 
+    @contextmanager
     def connect(self):
         db = sqlite3.connect(str(self.path), timeout=5, isolation_level=None)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA busy_timeout=5000")
         db.execute("PRAGMA foreign_keys=ON")
-        return db
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
 
     def _init(self):
         if not self.path.exists():
@@ -31,6 +37,9 @@ class AuthStore:
         os.chmod(self.path, 0o600)
         with self.connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+            if version not in (0, SCHEMA_VERSION):
+                raise RuntimeError(f"Unsupported auth schema version: {version}")
             db.executescript("""
             CREATE TABLE IF NOT EXISTS profiles (
                 profile_id TEXT PRIMARY KEY,
@@ -46,7 +55,7 @@ class AuthStore:
                 redirect_uri TEXT NOT NULL,
                 profile_id TEXT REFERENCES profiles(profile_id),
                 created_at INTEGER NOT NULL,
-                expires_at INTEGER NOT NULL,
+                expires_at INTEGER,
                 revoked_at INTEGER
             );
             CREATE TABLE IF NOT EXISTS pending_txns (
@@ -98,8 +107,9 @@ class AuthStore:
                 target_id TEXT NOT NULL,
                 created_at INTEGER NOT NULL
             );
-            PRAGMA user_version=1;
             """)
+            if version == 0:
+                db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             if db.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
                 raise RuntimeError("Unsupported auth schema")
 
@@ -127,7 +137,7 @@ class AuthStore:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             client = db.execute("""SELECT * FROM connections
-                WHERE client_id=? AND revoked_at IS NULL AND expires_at>?""",
+                WHERE client_id=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)""",
                 (client_id, now)).fetchone()
             if client is None or client["redirect_uri"] != redirect_uri:
                 raise ValueError("Invalid client or callback")
@@ -157,17 +167,17 @@ class AuthStore:
         now = int(time.time()) if now is None else int(now)
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            profile = db.execute("SELECT 1 FROM profiles WHERE profile_id=? AND revoked_at IS NULL",
+            profile = db.execute("SELECT platform FROM profiles WHERE profile_id=? AND revoked_at IS NULL",
                                  (profile_id,)).fetchone()
             if profile is None:
-                raise ValueError("Unknown or revoked profile")
+                return False
             txn = db.execute("""SELECT t.client_id,c.profile_id,c.platform_hint,c.revoked_at,
                                       c.expires_at
                 FROM pending_txns t JOIN connections c USING(client_id)
                 WHERE t.txn_id=?""", (txn_id,)).fetchone()
-            if txn is None or txn["revoked_at"] is not None or txn["expires_at"] <= now:
+            if txn is None or txn["revoked_at"] is not None or (txn["expires_at"] is not None and txn["expires_at"] <= now):
                 return False
-            if txn["platform_hint"] != profile_id.split("/", 1)[-1]:
+            if txn["platform_hint"] != profile["platform"]:
                 return False
             if txn["profile_id"] not in (None, profile_id):
                 return False
@@ -177,10 +187,16 @@ class AuthStore:
                 (profile_id,txn_id,now)).rowcount
             if updated != 1:
                 return False
-            db.execute("""UPDATE connections SET profile_id=?
+            db.execute("""UPDATE connections SET profile_id=?,expires_at=NULL
                 WHERE client_id=? AND (profile_id IS NULL OR profile_id=?)""",
                 (profile_id,txn["client_id"],profile_id))
             return True
+
+    def resolve_pending_code(self, match_code, now=None):
+        matches = [r["txn_id"] for r in self.pending(now) if r["match_code"] == match_code]
+        if len(matches) != 1:
+            raise ValueError(f"Match code ambiguous or missing ({len(matches)} matches): {matches}")
+        return matches[0]
 
     def deny(self, txn_id, now=None):
         now = int(time.time()) if now is None else int(now)
