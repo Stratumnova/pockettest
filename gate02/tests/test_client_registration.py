@@ -67,3 +67,11 @@ def test_registration_never_binds_profile(store):
     with store.connect() as db:
         row=db.execute("SELECT profile_id,platform_hint FROM connections WHERE client_id=?",(r["client_id"],)).fetchone()
         assert row["profile_id"] is None and row["platform_hint"]=="claude"
+
+def test_unbound_queue_cap_and_expiry(store):
+    for _ in range(5):
+        register_offline(store,{"redirect_uris":[CLAUDE]},now=1000)
+    with pytest.raises(ValueError,match="queue full"):
+        register_offline(store,{"redirect_uris":[CLAUDE]},now=1001)
+    # Expired unbound registrations no longer occupy capacity.
+    register_offline(store,{"redirect_uris":[CLAUDE]},now=1900)
