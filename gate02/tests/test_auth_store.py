@@ -111,3 +111,42 @@ def test_platform_binding(store):
     store.create_profile("owner","chatgpt")
     txn,_ = pending(store)
     assert not store.approve(txn,"owner/chatgpt",now=1001)
+
+
+def test_fresh_schema_v2(tmp_path):
+    store = AuthStore(tmp_path / "fresh.sqlite3")
+    with store.connect() as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert "scope" in [r[1] for r in db.execute("PRAGMA table_info(connections)")]
+
+
+def test_v1_migration_preserves_legacy_row(tmp_path):
+    path = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.execute("""CREATE TABLE connections (
+            client_id TEXT PRIMARY KEY, platform_hint TEXT, client_name TEXT,
+            redirect_uri TEXT, created_at INTEGER, expires_at INTEGER,
+            revoked_at INTEGER, profile_id TEXT, client_secret TEXT,
+            token_endpoint_auth_method TEXT, grant_types TEXT,
+            response_types TEXT, client_id_issued_at INTEGER)""")
+        db.execute("""INSERT INTO connections
+            (client_id,platform_hint,client_name,redirect_uri,created_at,expires_at)
+            VALUES ('old','claude','Claude',?,1000,1900)""", (CALLBACK,))
+        db.execute("PRAGMA user_version=1")
+    migrated = AuthStore(path)
+    with migrated.connect() as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("SELECT scope FROM connections WHERE client_id='old'").fetchone()[0] is None
+    assert migrated.get_registered_client("old", now=1001) is None
+
+
+def test_concurrent_v1_migration(tmp_path):
+    path = tmp_path / "parallel.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE connections (client_id TEXT PRIMARY KEY)")
+        db.execute("PRAGMA user_version=1")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        stores = list(pool.map(lambda _: AuthStore(path), range(2)))
+    with stores[0].connect() as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert [r[1] for r in db.execute("PRAGMA table_info(connections)")].count("scope") == 1
