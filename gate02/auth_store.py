@@ -4,10 +4,23 @@ import os
 import secrets
 import sqlite3
 import time
+import re
 from contextlib import contextmanager
 from pathlib import Path
 
 SCHEMA_VERSION = 1
+PLATFORMS = frozenset(("claude", "chatgpt"))
+CLAUDE_CALLBACK = "https://claude.ai/api/mcp/auth_callback"
+CHATGPT_CALLBACK = re.compile(r"\\Ahttps://chatgpt\\.com/connector/oauth/[A-Za-z0-9_-]{1,64}\\Z")
+
+
+def callback_platform(uri):
+    if uri == CLAUDE_CALLBACK:
+        return "claude"
+    if CHATGPT_CALLBACK.fullmatch(uri):
+        return "chatgpt"
+    raise ValueError("Callback is not allowlisted")
+
 
 def digest(value):
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
@@ -123,6 +136,10 @@ class AuthStore:
     def register_connection(self, client_id, platform_hint, client_name, redirect_uri,
                             ttl=900, now=None):
         now = int(time.time()) if now is None else int(now)
+        if platform_hint not in PLATFORMS or callback_platform(redirect_uri) != platform_hint:
+            raise ValueError("Invalid platform or callback")
+        if not client_id or ttl <= 0:
+            raise ValueError("Invalid registration")
         with self.connect() as db:
             db.execute("""INSERT INTO connections
                 (client_id,platform_hint,client_name,redirect_uri,created_at,expires_at)
