@@ -58,12 +58,18 @@ def test_bad_callbacks(provider,callback):
     {"token_endpoint_auth_method":"client_secret_basic"},
     {"grant_types":["authorization_code"]},
     {"response_types":["token"]},
-    {"redirect_uris":[CLAUDE,CHATGPT]},
 ])
 def test_reject_bad_sdk_metadata(provider,override):
     with pytest.raises(RegistrationError) as err:
         asyncio.run(provider.register_client(client(**override)))
     assert err.value.error == "invalid_client_metadata"
+
+def test_multiple_callbacks_invalid_redirect_uri(provider):
+    with pytest.raises(RegistrationError) as err:
+        asyncio.run(provider.register_client(
+            client(redirect_uris=[CLAUDE, CHATGPT])))
+    assert err.value.error == "invalid_redirect_uri"
+
 
 def test_missing_secret_fails_closed_on_read(provider):
     asyncio.run(provider.register_client(client()))
