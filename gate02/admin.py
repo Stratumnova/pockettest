@@ -29,9 +29,9 @@ def main(argv=None):
     elif args.action == "create-profile":
         print(store.create_profile(args.human,args.platform))
     elif args.action == "approve":
-        print("APPROVED" if store.approve(args.txn,args.profile) else "NOT APPROVED")
+        print("APPROVED" if store.approve(store.resolve_pending_code(args.txn) if len(args.txn)==4 and args.txn.isdigit() else args.txn,args.profile) else "NOT APPROVED")
     elif args.action == "deny":
-        print("DENIED" if store.deny(args.txn) else "NOT DENIED")
+        print("DENIED" if store.deny(store.resolve_pending_code(args.txn) if len(args.txn)==4 and args.txn.isdigit() else args.txn) else "NOT DENIED")
     elif args.action == "revoke":
         print("REVOKED" if store.revoke_connection(args.client_id) else "NOT REVOKED")
     elif args.action == "revoke-profile":
