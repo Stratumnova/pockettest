@@ -80,3 +80,11 @@ def test_redirect_uri_string_conversion(adapter):
             return CALLBACK
     url = asyncio.run(adapter.authorize(SimpleNamespace(client_id="sdk-client"), params(redirect_uri=URI())))
     assert url.startswith("https://roundtable.rodsrcpark.com/consent/")
+
+
+def test_absent_state_attribute_rejected(adapter):
+    p = params()
+    del p.state
+    with pytest.raises(AuthorizeError):
+        asyncio.run(adapter.authorize(SimpleNamespace(client_id="sdk-client"), p))
+    assert adapter.auth_store.pending() == []
