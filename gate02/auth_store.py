@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 SCHEMA_VERSION = 3
+CANONICAL_RESOURCE = "https://roundtable.rodsrcpark.com/mcp"
 PLATFORMS = frozenset(("claude", "chatgpt"))
 CLAUDE_CALLBACK = "https://claude.ai/api/mcp/auth_callback"
 CHATGPT_CALLBACK = re.compile(r"\Ahttps://chatgpt\.com/connector/oauth/[A-Za-z0-9_-]{1,64}\Z")
@@ -217,7 +218,7 @@ class AuthStore:
         return dict(row) if self._client_row_valid(row, now) else None
 
     def create_pending(self, client_id, redirect_uri, state, code_challenge,
-                       scopes=None, ttl=180, now=None):
+                       scopes=None, ttl=180, now=None, resource=None,\n                       redirect_uri_provided_explicitly=True):
         now = int(time.time()) if now is None else int(now)
         txn_id = secrets.token_urlsafe(32)
         match_code = f"{secrets.randbelow(10000):04d}"
@@ -245,7 +246,7 @@ class AuthStore:
                  scopes,created_at,expires_at)
                 VALUES(?,?,?,?,?,?,?,?,?)""",
                 (txn_id,client_id,match_code,redirect_uri,state,code_challenge,
-                 resolved_scopes,now,now+ttl))
+                 resolved_scopes,now,now+ttl,resource,int(redirect_uri_provided_explicitly)))
         return txn_id, match_code
 
     def pending(self, now=None):
