@@ -4,7 +4,8 @@ import sqlite3
 import pytest
 from mcp.shared.auth import OAuthClientInformationFull
 from auth_store import AuthStore, callback_platform
-from client_registration import C2ClientRegistration, RegistrationError
+from client_registration import C2ClientRegistration
+from mcp.server.auth.provider import RegistrationError
 
 CLAUDE="https://claude.ai/api/mcp/auth_callback"
 CHATGPT="https://chatgpt.com/connector/oauth/2K3bAoaL_ejV"
@@ -46,8 +47,9 @@ def test_positive_callbacks(provider,callback,platform):
     "https://evil.example/cb",
 ])
 def test_bad_callbacks(provider,callback):
-    with pytest.raises(RegistrationError):
+    with pytest.raises(RegistrationError) as err:
         asyncio.run(provider.register_client(client(callback)))
+    assert err.value.error == "invalid_redirect_uri"
 
 @pytest.mark.parametrize("override",[
     {"client_secret":None},
@@ -59,8 +61,9 @@ def test_bad_callbacks(provider,callback):
     {"redirect_uris":[CLAUDE,CHATGPT]},
 ])
 def test_reject_bad_sdk_metadata(provider,override):
-    with pytest.raises((RegistrationError,ValueError)):
+    with pytest.raises(RegistrationError) as err:
         asyncio.run(provider.register_client(client(**override)))
+    assert err.value.error == "invalid_client_metadata"
 
 def test_missing_secret_fails_closed_on_read(provider):
     asyncio.run(provider.register_client(client()))
@@ -77,8 +80,9 @@ def test_revoked_fails_closed(provider):
 def test_queue_limit(provider):
     for i in range(5):
         asyncio.run(provider.register_client(client(client_id=f"client-{i}")))
-    with pytest.raises(ValueError,match="queue full"):
+    with pytest.raises(RegistrationError) as err:
         asyncio.run(provider.register_client(client(client_id="sixth")))
+    assert err.value.error == "invalid_client_metadata"
 
 def test_sqlite_check_rejects_secretless_secret_post(provider):
     with provider.auth_store.connect() as db:
