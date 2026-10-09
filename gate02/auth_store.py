@@ -141,6 +141,11 @@ class AuthStore:
         if not client_id or ttl <= 0:
             raise ValueError("Invalid registration")
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            count = db.execute("""SELECT count(*) FROM connections WHERE profile_id IS NULL
+                AND revoked_at IS NULL AND expires_at>?""", (now,)).fetchone()[0]
+            if count >= 5:
+                raise ValueError("Unbound registration queue full")
             db.execute("""INSERT INTO connections
                 (client_id,platform_hint,client_name,redirect_uri,created_at,expires_at)
                 VALUES(?,?,?,?,?,?)""",
