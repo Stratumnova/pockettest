@@ -161,11 +161,13 @@ class AuthStore:
                                  (profile_id,)).fetchone()
             if profile is None:
                 raise ValueError("Unknown or revoked profile")
-            txn = db.execute("""SELECT t.client_id,c.profile_id,c.revoked_at,
+            txn = db.execute("""SELECT t.client_id,c.profile_id,c.platform_hint,c.revoked_at,
                                       c.expires_at
                 FROM pending_txns t JOIN connections c USING(client_id)
                 WHERE t.txn_id=?""", (txn_id,)).fetchone()
             if txn is None or txn["revoked_at"] is not None or txn["expires_at"] <= now:
+                return False
+            if txn["platform_hint"] != profile_id.split("/", 1)[-1]:
                 return False
             if txn["profile_id"] not in (None, profile_id):
                 return False
