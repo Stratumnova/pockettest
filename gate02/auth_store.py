@@ -353,6 +353,7 @@ class AuthStore:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("""
                 SELECT t.status, t.expires_at, t.resource,
+                       t.redirect_uri_provided_explicitly,
                        t.approved_profile, c.profile_id,
                        c.revoked_at AS connection_revoked,
                        p.revoked_at AS profile_revoked
@@ -364,6 +365,7 @@ class AuthStore:
             if (row is None or row["status"] != "approved"
                     or row["expires_at"] <= now
                     or row["resource"] != CANONICAL_RESOURCE
+                    or row["redirect_uri_provided_explicitly"] not in (0, 1)
                     or row["approved_profile"] is None
                     or row["approved_profile"] != row["profile_id"]
                     or row["connection_revoked"] is not None
@@ -380,28 +382,65 @@ class AuthStore:
                 return None
             return code
 
-    def redeem_auth_code(self, code, client_id, redirect_uri,
-                         code_verifier, resource, now=None):
-        """Atomically validate and consume a single-use OAuth authorization code."""
-        import base64
-        import hmac
-
+    def load_auth_code(self, code, client_id, now=None):
+        """Read a valid OAuth code without consuming it; SDK checks PKCE."""
         now = int(time.time()) if now is None else int(now)
-        if (not all(isinstance(v, str) and v for v in
-                    (code, client_id, redirect_uri, code_verifier, resource))
-                or resource != CANONICAL_RESOURCE
-                or re.fullmatch(r"[A-Za-z0-9._~-]{43,128}", code_verifier) is None):
+        if not all(isinstance(v, str) and v for v in (code, client_id)):
             return None
 
-        challenge = base64.urlsafe_b64encode(
-            hashlib.sha256(code_verifier.encode("ascii")).digest()
-        ).rstrip(b"=").decode("ascii")
+        with self.connect() as db:
+            row = db.execute("""
+                SELECT a.used_at, a.expires_at AS code_expires,
+                       t.txn_id, t.client_id, t.redirect_uri,
+                       t.redirect_uri_provided_explicitly,
+                       t.code_challenge, t.scopes, t.resource,
+                       t.status, t.approved_profile,
+                       c.profile_id, c.revoked_at AS connection_revoked,
+                       p.revoked_at AS profile_revoked
+                FROM auth_codes a
+                JOIN pending_txns t ON t.txn_id=a.txn_id
+                JOIN connections c ON c.client_id=t.client_id
+                LEFT JOIN profiles p ON p.profile_id=t.approved_profile
+                WHERE a.code_hash=?
+            """, (digest(code),)).fetchone()
+
+        if (row is None or row["used_at"] is not None
+                or row["code_expires"] <= now
+                or row["status"] != "approved"
+                or row["client_id"] != client_id
+                or row["resource"] != CANONICAL_RESOURCE
+                or row["redirect_uri_provided_explicitly"] not in (0, 1)
+                or row["approved_profile"] is None
+                or row["approved_profile"] != row["profile_id"]
+                or row["connection_revoked"] is not None
+                or row["profile_revoked"] is not None):
+            return None
+
+        return {
+            "client_id": row["client_id"],
+            "txn_id": row["txn_id"],
+            "redirect_uri": row["redirect_uri"],
+            "redirect_uri_provided_explicitly": bool(
+                row["redirect_uri_provided_explicitly"]
+            ),
+            "code_challenge": row["code_challenge"],
+            "scopes": row["scopes"].split(),
+            "resource": row["resource"],
+            "expires_at": row["code_expires"],
+        }
+
+    def consume_auth_code(self, code, client_id, now=None):
+        """Atomically validate and consume an OAuth authorization code."""
+        now = int(time.time()) if now is None else int(now)
+        if not all(isinstance(v, str) and v for v in (code, client_id)):
+            return None
 
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("""
                 SELECT a.used_at, a.expires_at AS code_expires,
                        t.txn_id, t.client_id, t.redirect_uri,
+                       t.redirect_uri_provided_explicitly,
                        t.code_challenge, t.scopes, t.resource,
                        t.status, t.approved_profile,
                        c.profile_id, c.revoked_at AS connection_revoked,
@@ -417,13 +456,12 @@ class AuthStore:
                     or row["code_expires"] <= now
                     or row["status"] != "approved"
                     or row["client_id"] != client_id
-                    or row["redirect_uri"] != redirect_uri
-                    or row["resource"] != resource
+                    or row["resource"] != CANONICAL_RESOURCE
+                    or row["redirect_uri_provided_explicitly"] not in (0, 1)
                     or row["approved_profile"] is None
                     or row["approved_profile"] != row["profile_id"]
                     or row["connection_revoked"] is not None
-                    or row["profile_revoked"] is not None
-                    or not hmac.compare_digest(row["code_challenge"], challenge)):
+                    or row["profile_revoked"] is not None):
                 return None
 
             updated = db.execute("""
@@ -431,18 +469,27 @@ class AuthStore:
                 WHERE code_hash=? AND used_at IS NULL AND expires_at>?
             """, (now, digest(code), now)).rowcount
             if updated != 1:
-                return None
+                raise sqlite3.IntegrityError("Authorization code consume conflict")
 
-            consumed = db.execute("""
+            updated = db.execute("""
                 UPDATE pending_txns SET status='consumed'
                 WHERE txn_id=? AND status='approved'
             """, (row["txn_id"],)).rowcount
-            if consumed != 1:
-                raise sqlite3.IntegrityError(
-                    "Authorization transaction consumption failed"
-                )
-            return {"client_id": client_id, "scopes": row["scopes"],
-                    "resource": row["resource"], "txn_id": row["txn_id"]}
+            if updated != 1:
+                raise sqlite3.IntegrityError("Transaction consume conflict")
+
+            return {
+                "client_id": row["client_id"],
+                "txn_id": row["txn_id"],
+                "redirect_uri": row["redirect_uri"],
+                "redirect_uri_provided_explicitly": bool(
+                    row["redirect_uri_provided_explicitly"]
+                ),
+                "code_challenge": row["code_challenge"],
+                "scopes": row["scopes"].split(),
+                "resource": row["resource"],
+                "expires_at": row["code_expires"],
+            }
 
     def backup(self, destination):
         dest = Path(destination)

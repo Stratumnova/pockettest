@@ -412,7 +412,19 @@ def test_issue_auth_code_once_under_concurrency(store):
     assert digest(codes[0]) != codes[0]
 
 
-def test_redeem_auth_code_success_and_replay(store):
+
+
+
+
+
+
+
+
+
+
+
+
+def test_issue_auth_code_rejects_legacy_null_redirect_flag(store):
     import base64
     import hashlib
 
@@ -425,233 +437,573 @@ def test_redeem_auth_code_success_and_replay(store):
         "client1", CALLBACK, "state", challenge, now=1000
     )
     assert store.approve(txn, "owner/claude", now=1001)
-
-    code = store.issue_auth_code(txn, now=1002)
-    assert code is not None
-
-    result = store.redeem_auth_code(
-        code, "client1", CALLBACK, verifier,
-        "https://roundtable.rodsrcpark.com/mcp", now=1003
-    )
-
-    assert result == {
-        "client_id": "client1",
-        "scopes": "roundtable.append",
-        "resource": "https://roundtable.rodsrcpark.com/mcp",
-        "txn_id": txn,
-    }
-
-    assert store.redeem_auth_code(
-        code, "client1", CALLBACK, verifier,
-        "https://roundtable.rodsrcpark.com/mcp", now=1004
-    ) is None
-
-    with store.connect() as db:
-        used = db.execute(
-            "SELECT used_at FROM auth_codes WHERE txn_id=?", (txn,)
-        ).fetchone()[0]
-        status = db.execute(
-            "SELECT status FROM pending_txns WHERE txn_id=?", (txn,)
-        ).fetchone()[0]
-
-    assert used == 1003
-    assert status == "consumed"
-
-
-@pytest.mark.parametrize("invalid_field", [
-    "verifier", "client", "callback", "resource"
-])
-def test_redeem_auth_code_rejects_mismatch_without_consuming(store, invalid_field):
-    import base64
-    import hashlib
-
-    verifier = "V" * 43
-    challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(verifier.encode("ascii")).digest()
-    ).rstrip(b"=").decode("ascii")
-
-    txn, _ = store.create_pending(
-        "client1", CALLBACK, "state", challenge, now=1000
-    )
-    assert store.approve(txn, "owner/claude", now=1001)
-    code = store.issue_auth_code(txn, now=1002)
-    assert code is not None
-
-    args = {
-        "code": code,
-        "client_id": "client1",
-        "redirect_uri": CALLBACK,
-        "code_verifier": verifier,
-        "resource": "https://roundtable.rodsrcpark.com/mcp",
-        "now": 1003,
-    }
-    changes = {
-        "verifier": ("code_verifier", "X" * 43),
-        "client": ("client_id", "wrong-client"),
-        "callback": ("redirect_uri", "https://wrong.example/callback"),
-        "resource": ("resource", "https://wrong.example/mcp"),
-    }
-    key, value = changes[invalid_field]
-    args[key] = value
-
-    assert store.redeem_auth_code(**args) is None
-
-    with store.connect() as db:
-        assert db.execute(
-            "SELECT used_at FROM auth_codes WHERE txn_id=?", (txn,)
-        ).fetchone()[0] is None
-
-    args[key] = {
-        "code_verifier": verifier,
-        "client_id": "client1",
-        "redirect_uri": CALLBACK,
-        "resource": "https://roundtable.rodsrcpark.com/mcp",
-    }[key]
-    assert store.redeem_auth_code(**args) is not None
-
-
-@pytest.mark.parametrize("redeem_at,expected_success", [
-    (1541, True),
-    (1542, False),
-    (1543, False),
-])
-def test_redeem_auth_code_540_second_boundary(store, redeem_at, expected_success):
-    import base64
-    import hashlib
-
-    verifier = "V" * 43
-    challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(verifier.encode("ascii")).digest()
-    ).rstrip(b"=").decode("ascii")
-
-    txn, _ = store.create_pending(
-        "client1", CALLBACK, "state", challenge, now=1000
-    )
-    assert store.approve(txn, "owner/claude", now=1001)
-
-    code = store.issue_auth_code(txn, now=1002)
-    assert code is not None
-
-    result = store.redeem_auth_code(
-        code, "client1", CALLBACK, verifier,
-        "https://roundtable.rodsrcpark.com/mcp",
-        now=redeem_at,
-    )
-    assert (result is not None) is expected_success
-
-
-@pytest.mark.parametrize("target", ["connection", "profile"])
-def test_redeem_auth_code_rejects_revocation(store, target):
-    import base64
-    import hashlib
-
-    verifier = "V" * 43
-    challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(verifier.encode("ascii")).digest()
-    ).rstrip(b"=").decode("ascii")
-
-    txn, _ = store.create_pending(
-        "client1", CALLBACK, "state", challenge, now=1000
-    )
-    assert store.approve(txn, "owner/claude", now=1001)
-    code = store.issue_auth_code(txn, now=1002)
-    assert code is not None
-
-    if target == "connection":
-        assert store.revoke_connection("client1", now=1003)
-    else:
-        assert store.revoke_profile("owner/claude", now=1003)
-
-    assert store.redeem_auth_code(
-        code, "client1", CALLBACK, verifier,
-        "https://roundtable.rodsrcpark.com/mcp", now=1004
-    ) is None
-
-    with store.connect() as db:
-        assert db.execute(
-            "SELECT used_at FROM auth_codes WHERE txn_id=?",
-            (txn,),
-        ).fetchone()[0] is None
-
-
-def test_redeem_auth_code_once_under_concurrency(store):
-    import base64
-    import hashlib
-
-    verifier = "V" * 43
-    challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(verifier.encode("ascii")).digest()
-    ).rstrip(b"=").decode("ascii")
-
-    txn, _ = store.create_pending(
-        "client1", CALLBACK, "state", challenge, now=1000
-    )
-    assert store.approve(txn, "owner/claude", now=1001)
-    code = store.issue_auth_code(txn, now=1002)
-    assert code is not None
-
-    def redeem(_):
-        return store.redeem_auth_code(
-            code, "client1", CALLBACK, verifier,
-            "https://roundtable.rodsrcpark.com/mcp",
-            now=1003,
-        )
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(redeem, range(2)))
-
-    assert sum(result is not None for result in results) == 1
-    assert sum(result is None for result in results) == 1
-
-    with store.connect() as db:
-        row = db.execute(
-            "SELECT used_at FROM auth_codes WHERE txn_id=?",
-            (txn,),
-        ).fetchone()
-    assert row["used_at"] == 1003
-
-
-def test_redeem_auth_code_rolls_back_if_transaction_update_fails(store):
-    import base64
-    import hashlib
-
-    verifier = "V" * 43
-    challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(verifier.encode("ascii")).digest()
-    ).rstrip(b"=").decode("ascii")
-
-    txn, _ = store.create_pending(
-        "client1", CALLBACK, "state", challenge, now=1000
-    )
-    assert store.approve(txn, "owner/claude", now=1001)
-    code = store.issue_auth_code(txn, now=1002)
-    assert code is not None
 
     with store.connect() as db:
         db.execute("""
-            CREATE TRIGGER block_pending_consumption
-            BEFORE UPDATE OF status ON pending_txns
-            WHEN NEW.status = 'consumed'
-            BEGIN
-                SELECT RAISE(IGNORE);
-            END
-        """)
+            UPDATE pending_txns
+            SET redirect_uri_provided_explicitly = NULL
+            WHERE txn_id = ?
+        """, (txn,))
 
-    import sqlite3
-    with pytest.raises(sqlite3.IntegrityError):
-        store.redeem_auth_code(
-            code, "client1", CALLBACK, verifier,
-            "https://roundtable.rodsrcpark.com/mcp",
-            now=1003,
-        )
+    assert store.issue_auth_code(txn, now=1002) is None
 
     with store.connect() as db:
-        row = db.execute("""
+        count = db.execute(
+            "SELECT COUNT(*) FROM auth_codes WHERE txn_id=?",
+            (txn,),
+        ).fetchone()[0]
+
+    assert count == 0
+
+
+def test_load_auth_code_twice_is_read_only(store):
+    import base64
+    import hashlib
+
+    verifier = "V" * 43
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
+
+    txn, _ = store.create_pending(
+        "client1", CALLBACK, "state", challenge, now=1000
+    )
+    assert store.approve(txn, "owner/claude", now=1001)
+
+    code = store.issue_auth_code(txn, now=1002)
+    assert code is not None
+
+    first = store.load_auth_code(code, "client1", now=1003)
+    second = store.load_auth_code(code, "client1", now=1003)
+
+    assert first is not None
+    assert first == second
+    assert first["redirect_uri_provided_explicitly"] is True
+
+    with store.connect() as db:
+        record = db.execute("""
             SELECT a.used_at, t.status
             FROM auth_codes a
             JOIN pending_txns t ON t.txn_id = a.txn_id
             WHERE t.txn_id = ?
         """, (txn,)).fetchone()
 
+    assert record["used_at"] is None
+    assert record["status"] == "approved"
+
+
+def test_consume_auth_code_success_and_replay(store):
+    import base64
+    import hashlib
+
+    verifier = "V" * 43
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
+
+    txn, _ = store.create_pending(
+        "client1", CALLBACK, "state", challenge, now=1000
+    )
+    assert store.approve(txn, "owner/claude", now=1001)
+
+    code = store.issue_auth_code(txn, now=1002)
+    assert code is not None
+
+    loaded = store.load_auth_code(code, "client1", now=1003)
+    assert loaded is not None
+
+    consumed = store.consume_auth_code(code, "client1", now=1004)
+    assert consumed == loaded
+
+    assert store.load_auth_code(code, "client1", now=1005) is None
+    assert store.consume_auth_code(code, "client1", now=1005) is None
+
+    with store.connect() as db:
+        record = db.execute("""
+            SELECT a.used_at, t.status
+            FROM auth_codes a
+            JOIN pending_txns t ON t.txn_id = a.txn_id
+            WHERE t.txn_id = ?
+        """, (txn,)).fetchone()
+
+    assert record["used_at"] == 1004
+    assert record["status"] == "consumed"
+
+
+def test_consume_auth_code_rechecks_revocation_after_load(store):
+    import base64
+    import hashlib
+
+    verifier = "V" * 43
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
+
+    txn, _ = store.create_pending(
+        "client1", CALLBACK, "state", challenge, now=1000
+    )
+    assert store.approve(txn, "owner/claude", now=1001)
+
+    code = store.issue_auth_code(txn, now=1002)
+    assert code is not None
+    assert store.load_auth_code(code, "client1", now=1003) is not None
+
+    with store.connect() as db:
+        db.execute(
+            "UPDATE connections SET revoked_at=? WHERE client_id=?",
+            (1004, "client1"),
+        )
+
+    assert store.consume_auth_code(code, "client1", now=1005) is None
+
+    with store.connect() as db:
+        record = db.execute("""
+            SELECT a.used_at, t.status
+            FROM auth_codes a
+            JOIN pending_txns t ON t.txn_id=a.txn_id
+            WHERE t.txn_id=?
+        """, (txn,)).fetchone()
+
+    assert record["used_at"] is None
+    assert record["status"] == "approved"
+
+
+def test_consume_auth_code_concurrent_only_one_succeeds(store):
+    import base64
+    import hashlib
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    verifier = "V" * 43
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
+
+    txn, _ = store.create_pending(
+        "client1", CALLBACK, "state", challenge, now=1000
+    )
+    assert store.approve(txn, "owner/claude", now=1001)
+
+    code = store.issue_auth_code(txn, now=1002)
+    assert code is not None
+
+    barrier = Barrier(2)
+
+    def attempt():
+        barrier.wait(timeout=10)
+        return store.consume_auth_code(code, "client1", now=1003)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(attempt) for _ in range(2)]
+        results = [future.result(timeout=15) for future in futures]
+
+    assert sum(result is not None for result in results) == 1
+
+    with store.connect() as db:
+        record = db.execute("""
+            SELECT a.used_at, t.status
+            FROM auth_codes a
+            JOIN pending_txns t ON t.txn_id=a.txn_id
+            WHERE t.txn_id=?
+        """, (txn,)).fetchone()
+
+    assert record["used_at"] == 1003
+    assert record["status"] == "consumed"
+
+
+def test_consume_auth_code_unknown_and_expired(store):
+    import base64
+    import hashlib
+
+    assert store.consume_auth_code(
+        "unknown-authorization-code", "client1", now=1003
+    ) is None
+
+    verifier = "V" * 43
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
+
+    txn, _ = store.create_pending(
+        "client1", CALLBACK, "state", challenge, now=1000
+    )
+    assert store.approve(txn, "owner/claude", now=1001)
+
+    code = store.issue_auth_code(txn, now=1002)
+    assert code is not None
+
+    # Code lifetime: 540 seconds from issuance.
+    assert store.consume_auth_code(
+        code, "client1", now=1542
+    ) is None
+
+    with store.connect() as db:
+        record = db.execute("""
+            SELECT a.used_at, t.status
+            FROM auth_codes a
+            JOIN pending_txns t ON t.txn_id=a.txn_id
+            WHERE t.txn_id=?
+        """, (txn,)).fetchone()
+
+    assert record["used_at"] is None
+    assert record["status"] == "approved"
+
+
+def test_load_and_consume_auth_code_540_second_boundary(store):
+    import base64
+    import hashlib
+
+    verifier = "V" * 43
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
+
+    def make_code(start):
+        txn, _ = store.create_pending(
+            "client1", CALLBACK, "state", challenge, now=start
+        )
+        assert store.approve(txn, "owner/claude", now=start + 1)
+        code = store.issue_auth_code(txn, now=start + 2)
+        assert code is not None
+        return code
+
+    # Issued at 1002; expires at 1542.
+    valid_code = make_code(1000)
+    assert store.load_auth_code(valid_code, "client1", now=1541) is not None
+    assert store.consume_auth_code(valid_code, "client1", now=1541) is not None
+    assert store.load_auth_code(valid_code, "client1", now=1542) is None
+    assert store.consume_auth_code(valid_code, "client1", now=1543) is None
+
+    expired_code = make_code(1000)
+    assert store.load_auth_code(expired_code, "client1", now=1542) is None
+    assert store.consume_auth_code(expired_code, "client1", now=1542) is None
+    assert store.load_auth_code(expired_code, "client1", now=1543) is None
+    assert store.consume_auth_code(expired_code, "client1", now=1543) is None
+
+
+@pytest.mark.parametrize("trigger_action", ["IGNORE", "ABORT"])
+def test_consume_auth_code_rolls_back_if_transaction_update_fails(store, trigger_action):
+    import base64
+    import hashlib
+    import sqlite3
+    import pytest
+
+    verifier = "V" * 43
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
+
+    txn, _ = store.create_pending(
+        "client1", CALLBACK, "state", challenge, now=1000
+    )
+    assert store.approve(txn, "owner/claude", now=1001)
+
+    code = store.issue_auth_code(txn, now=1002)
+    assert code is not None
+
+    error_message = (
+        "" if trigger_action == "IGNORE"
+        else ", 'simulated transaction failure'"
+    )
+
+    with store.connect() as db:
+        db.execute(f"""
+            CREATE TRIGGER reject_consume_transaction
+            BEFORE UPDATE OF status ON pending_txns
+            WHEN NEW.status = 'consumed'
+            BEGIN
+                SELECT RAISE({trigger_action}{error_message});
+            END
+        """)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.consume_auth_code(code, "client1", now=1003)
+
+    with store.connect() as db:
+        record = db.execute("""
+            SELECT a.used_at, t.status
+            FROM auth_codes a
+            JOIN pending_txns t ON t.txn_id = a.txn_id
+            WHERE t.txn_id = ?
+        """, (txn,)).fetchone()
+
+    assert record["used_at"] is None
+    assert record["status"] == "approved"
+
+
+def test_load_and_consume_reject_legacy_null_redirect_flag(store):
+    import base64
+    import hashlib
+
+    verifier = "V" * 43
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
+
+    txn, _ = store.create_pending(
+        "client1", CALLBACK, "state", challenge, now=1000
+    )
+    assert store.approve(txn, "owner/claude", now=1001)
+
+    # Issue while the flag is valid, then simulate a legacy NULL row.
+    code = store.issue_auth_code(txn, now=1002)
+    assert code is not None
+
+    with store.connect() as db:
+        db.execute("""
+            UPDATE pending_txns
+            SET redirect_uri_provided_explicitly=NULL
+            WHERE txn_id=?
+        """, (txn,))
+
+    assert store.load_auth_code(code, "client1", now=1003) is None
+    assert store.consume_auth_code(code, "client1", now=1003) is None
+
+    with store.connect() as db:
+        record = db.execute("""
+            SELECT a.used_at, t.status
+            FROM auth_codes a
+            JOIN pending_txns t ON t.txn_id=a.txn_id
+            WHERE t.txn_id=?
+        """, (txn,)).fetchone()
+
+    assert record["used_at"] is None
+    assert record["status"] == "approved"
+
+
+def sdk_exchange(store, code, client_id, redirect_uri, verifier, now):
+    """Test-only simulation of SDK validation before code consumption."""
+    import base64
+    import hashlib
+
+    loaded = store.load_auth_code(code, client_id, now=now)
+    if loaded is None:
+        return None
+
+    expected_redirect = (
+        loaded["redirect_uri"]
+        if loaded["redirect_uri_provided_explicitly"]
+        else None
+    )
+    if (str(redirect_uri) if redirect_uri is not None else None) != (
+        str(expected_redirect) if expected_redirect is not None else None
+    ):
+        return None
+
+    if not isinstance(verifier, str):
+        return None
+
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
+
+    if challenge != loaded["code_challenge"]:
+        return None
+
+    return store.consume_auth_code(code, client_id, now=now)
+
+
+def test_sdk_exchange_redirect_flag_true_and_false(store):
+    import base64
+    import hashlib
+
+    verifier = "V" * 43
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
+
+    def make_code(explicit):
+        txn, _ = store.create_pending(
+            "client1", CALLBACK, "state", challenge,
+            now=1000,
+            redirect_uri_provided_explicitly=explicit,
+        )
+        assert store.approve(txn, "owner/claude", now=1001)
+        code = store.issue_auth_code(txn, now=1002)
+        assert code is not None
+        return txn, code
+
+    # Explicit redirect: missing or incorrect URI must fail.
+    explicit_txn, explicit_code = make_code(True)
+    assert store.load_auth_code(
+        explicit_code, "client1", now=1003
+    )["redirect_uri_provided_explicitly"] is True
+
+    assert sdk_exchange(
+        store, explicit_code, "client1", None, verifier, 1003
+    ) is None
+    assert sdk_exchange(
+        store, explicit_code, "client1",
+        "https://wrong.example/callback", verifier, 1003
+    ) is None
+    assert sdk_exchange(
+        store, explicit_code, "client1", CALLBACK,
+        "W" * 43, 1003
+    ) is None
+
+    with store.connect() as db:
+        row = db.execute("""
+            SELECT a.used_at, t.status
+            FROM auth_codes a
+            JOIN pending_txns t ON t.txn_id=a.txn_id
+            WHERE t.txn_id=?
+        """, (explicit_txn,)).fetchone()
     assert row["used_at"] is None
     assert row["status"] == "approved"
+
+    assert sdk_exchange(
+        store, explicit_code, "client1", CALLBACK, verifier, 1004
+    ) is not None
+
+    # Implicit redirect: SDK need not receive redirect_uri again.
+    implicit_txn, implicit_code = make_code(False)
+    assert store.load_auth_code(
+        implicit_code, "client1", now=1003
+    )["redirect_uri_provided_explicitly"] is False
+
+    assert sdk_exchange(
+        store, implicit_code, "client1", CALLBACK, verifier, 1003
+    ) is None
+
+    with store.connect() as db:
+        record = db.execute("""
+            SELECT a.used_at, t.status
+            FROM auth_codes a
+            JOIN pending_txns t ON t.txn_id=a.txn_id
+            WHERE t.txn_id=?
+        """, (implicit_txn,)).fetchone()
+
+    assert record["used_at"] is None
+    assert record["status"] == "approved"
+
+    assert sdk_exchange(
+        store, implicit_code, "client1", None, verifier, 1004
+    ) is not None
+
+    with store.connect() as db:
+        row = db.execute(
+            "SELECT status FROM pending_txns WHERE txn_id=?",
+            (implicit_txn,),
+        ).fetchone()
+    assert row["status"] == "consumed"
+
+
+def test_load_and_consume_reject_wrong_client_without_consuming(store):
+    import base64
+    import hashlib
+
+    verifier = "V" * 43
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
+
+    txn, _ = store.create_pending(
+        "client1", CALLBACK, "state", challenge, now=1000
+    )
+    assert store.approve(txn, "owner/claude", now=1001)
+
+    code = store.issue_auth_code(txn, now=1002)
+    assert code is not None
+
+    assert store.load_auth_code(
+        code, "wrong-client", now=1003
+    ) is None
+
+    assert store.consume_auth_code(
+        code, "wrong-client", now=1003
+    ) is None
+
+    with store.connect() as db:
+        record = db.execute("""
+            SELECT a.used_at, t.status
+            FROM auth_codes a
+            JOIN pending_txns t ON t.txn_id=a.txn_id
+            WHERE t.txn_id=?
+        """, (txn,)).fetchone()
+
+    assert record["used_at"] is None
+    assert record["status"] == "approved"
+
+    # A rejected attempt must not invalidate the legitimate client.
+    assert store.load_auth_code(
+        code, "client1", now=1004
+    ) is not None
+
+
+@pytest.mark.parametrize("target", ["connection", "profile"])
+def test_load_and_consume_reject_real_revocation_methods(store, target):
+    import base64
+    import hashlib
+
+    verifier = "V" * 43
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
+
+    txn, _ = store.create_pending(
+        "client1", CALLBACK, "state", challenge, now=1000
+    )
+    assert store.approve(txn, "owner/claude", now=1001)
+
+    code = store.issue_auth_code(txn, now=1002)
+    assert code is not None
+    assert store.load_auth_code(code, "client1", now=1003) is not None
+
+    if target == "connection":
+        assert store.revoke_connection("client1", now=1004)
+    else:
+        assert store.revoke_profile("owner/claude", now=1004)
+
+    assert store.load_auth_code(code, "client1", now=1005) is None
+    assert store.consume_auth_code(code, "client1", now=1005) is None
+
+    with store.connect() as db:
+        record = db.execute("""
+            SELECT a.used_at, t.status
+            FROM auth_codes a
+            JOIN pending_txns t ON t.txn_id=a.txn_id
+            WHERE t.txn_id=?
+        """, (txn,)).fetchone()
+
+    assert record["used_at"] is None
+    assert record["status"] == "approved"
+
+
+def test_load_and_consume_reject_noncanonical_resource(store):
+    import base64
+    import hashlib
+
+    verifier = "V" * 43
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
+
+    txn, _ = store.create_pending(
+        "client1", CALLBACK, "state", challenge, now=1000
+    )
+    assert store.approve(txn, "owner/claude", now=1001)
+
+    code = store.issue_auth_code(txn, now=1002)
+    assert code is not None
+
+    # Simulate a stored code linked to a noncanonical resource.
+    with store.connect() as db:
+        db.execute("""
+            UPDATE pending_txns
+            SET resource=?
+            WHERE txn_id=?
+        """, ("https://wrong.example/mcp", txn))
+
+    assert store.load_auth_code(code, "client1", now=1003) is None
+    assert store.consume_auth_code(code, "client1", now=1003) is None
+
+    with store.connect() as db:
+        record = db.execute("""
+            SELECT a.used_at, t.status
+            FROM auth_codes a
+            JOIN pending_txns t ON t.txn_id=a.txn_id
+            WHERE t.txn_id=?
+        """, (txn,)).fetchone()
+
+    assert record["used_at"] is None
+    assert record["status"] == "approved"
