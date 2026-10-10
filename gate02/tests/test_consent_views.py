@@ -11,7 +11,7 @@ def test_pending_consent_page_and_status(tmp_path):
                               client_secret="secret", auth_method="client_secret_post",
                               grant_types='["authorization_code","refresh_token"]',
                               response_types='["code"]', scope="roundtable.append")
-    txn, match = store.create_pending("c", CALLBACK, "secret-state", "A" * 43, now=1000)
+    txn, match = store.create_pending("c", CALLBACK, "secret-state", "A" * 43, now=1000, ttl=180)
     page = consent_page(store, txn, now=1001)
     body = page.body.decode()
     assert page.status_code == 200

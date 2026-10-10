@@ -146,6 +146,9 @@ class AuthStore:
             for statement in schema.split(";"):
                 if statement.strip():
                     db.execute(statement)
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_auth_codes_txn_id ON auth_codes(txn_id)"
+            )
             columns = {row[1] for row in db.execute("PRAGMA table_info(connections)")}
             if "scope" not in columns:
                 db.execute("ALTER TABLE connections ADD COLUMN scope TEXT")
@@ -218,7 +221,7 @@ class AuthStore:
         return dict(row) if self._client_row_valid(row, now) else None
 
     def create_pending(self, client_id, redirect_uri, state, code_challenge,
-                       scopes=None, ttl=180, now=None, resource=None,
+                       scopes=None, ttl=1500, now=None, resource=None,
                        redirect_uri_provided_explicitly=True):
         now = int(time.time()) if now is None else int(now)
         if resource is None:
@@ -342,6 +345,104 @@ class AuthStore:
                     db.execute("UPDATE pending_txns SET status='denied' WHERE client_id=? AND status='pending'",(cid,))
                 db.execute("INSERT INTO revocations(target_type,target_id,created_at) VALUES('profile',?,?)",(profile_id,now))
             return changed == 1
+
+    def issue_auth_code(self, txn_id, now=None):
+        """Issue one short-lived OAuth code after valid owner approval."""
+        now = int(time.time()) if now is None else int(now)
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("""
+                SELECT t.status, t.expires_at, t.resource,
+                       t.approved_profile, c.profile_id,
+                       c.revoked_at AS connection_revoked,
+                       p.revoked_at AS profile_revoked
+                FROM pending_txns t
+                JOIN connections c ON c.client_id=t.client_id
+                LEFT JOIN profiles p ON p.profile_id=t.approved_profile
+                WHERE t.txn_id=?
+            """, (txn_id,)).fetchone()
+            if (row is None or row["status"] != "approved"
+                    or row["expires_at"] <= now
+                    or row["resource"] != CANONICAL_RESOURCE
+                    or row["approved_profile"] is None
+                    or row["approved_profile"] != row["profile_id"]
+                    or row["connection_revoked"] is not None
+                    or row["profile_revoked"] is not None):
+                return None
+
+            code = secrets.token_urlsafe(32)
+            try:
+                db.execute("""
+                    INSERT INTO auth_codes(code_hash,txn_id,expires_at)
+                    VALUES(?,?,?)
+                """, (digest(code), txn_id, now + 540))
+            except sqlite3.IntegrityError:
+                return None
+            return code
+
+    def redeem_auth_code(self, code, client_id, redirect_uri,
+                         code_verifier, resource, now=None):
+        """Atomically validate and consume a single-use OAuth authorization code."""
+        import base64
+        import hmac
+
+        now = int(time.time()) if now is None else int(now)
+        if (not all(isinstance(v, str) and v for v in
+                    (code, client_id, redirect_uri, code_verifier, resource))
+                or resource != CANONICAL_RESOURCE
+                or re.fullmatch(r"[A-Za-z0-9._~-]{43,128}", code_verifier) is None):
+            return None
+
+        challenge = base64.urlsafe_b64encode(
+            hashlib.sha256(code_verifier.encode("ascii")).digest()
+        ).rstrip(b"=").decode("ascii")
+
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("""
+                SELECT a.used_at, a.expires_at AS code_expires,
+                       t.txn_id, t.client_id, t.redirect_uri,
+                       t.code_challenge, t.scopes, t.resource,
+                       t.status, t.approved_profile,
+                       c.profile_id, c.revoked_at AS connection_revoked,
+                       p.revoked_at AS profile_revoked
+                FROM auth_codes a
+                JOIN pending_txns t ON t.txn_id=a.txn_id
+                JOIN connections c ON c.client_id=t.client_id
+                LEFT JOIN profiles p ON p.profile_id=t.approved_profile
+                WHERE a.code_hash=?
+            """, (digest(code),)).fetchone()
+
+            if (row is None or row["used_at"] is not None
+                    or row["code_expires"] <= now
+                    or row["status"] != "approved"
+                    or row["client_id"] != client_id
+                    or row["redirect_uri"] != redirect_uri
+                    or row["resource"] != resource
+                    or row["approved_profile"] is None
+                    or row["approved_profile"] != row["profile_id"]
+                    or row["connection_revoked"] is not None
+                    or row["profile_revoked"] is not None
+                    or not hmac.compare_digest(row["code_challenge"], challenge)):
+                return None
+
+            updated = db.execute("""
+                UPDATE auth_codes SET used_at=?
+                WHERE code_hash=? AND used_at IS NULL AND expires_at>?
+            """, (now, digest(code), now)).rowcount
+            if updated != 1:
+                return None
+
+            consumed = db.execute("""
+                UPDATE pending_txns SET status='consumed'
+                WHERE txn_id=? AND status='approved'
+            """, (row["txn_id"],)).rowcount
+            if consumed != 1:
+                raise sqlite3.IntegrityError(
+                    "Authorization transaction consumption failed"
+                )
+            return {"client_id": client_id, "scopes": row["scopes"],
+                    "resource": row["resource"], "txn_id": row["txn_id"]}
 
     def backup(self, destination):
         dest = Path(destination)

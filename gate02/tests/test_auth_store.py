@@ -282,3 +282,376 @@ def test_pending_rejects_invalid_redirect_flag(store, flag):
         store.create_pending("client1", CALLBACK, "state", "challenge",
                              redirect_uri_provided_explicitly=flag, now=1000)
     assert store.pending(now=1001) == []
+
+
+def test_default_pending_lifetime_25_minutes(store):
+    txn, _ = store.create_pending(
+        "client1", CALLBACK, "state", "A" * 43, now=1000
+    )
+    with store.connect() as db:
+        row = db.execute(
+            "SELECT created_at, expires_at FROM pending_txns WHERE txn_id=?",
+            (txn,),
+        ).fetchone()
+    assert row["created_at"] == 1000
+    assert row["expires_at"] == 2500
+    assert any(item["txn_id"] == txn for item in store.pending(now=2499))
+    assert not any(item["txn_id"] == txn for item in store.pending(now=2500))
+    assert not store.approve(txn, "owner/claude", now=2500)
+
+
+def test_only_one_auth_code_per_transaction(store):
+    txn, _ = pending(store)
+    with store.connect() as db:
+        db.execute(
+            "INSERT INTO auth_codes(code_hash,txn_id,expires_at) VALUES(?,?,?)",
+            (digest("first-code"), txn, 1600),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute(
+                "INSERT INTO auth_codes(code_hash,txn_id,expires_at) VALUES(?,?,?)",
+                (digest("second-code"), txn, 1600),
+            )
+
+
+def test_existing_duplicate_auth_codes_fail_migration(store):
+    txn, _ = pending(store)
+    with store.connect() as db:
+        db.execute("DROP INDEX ux_auth_codes_txn_id")
+        for value in ("first", "second"):
+            db.execute(
+                "INSERT INTO auth_codes(code_hash,txn_id,expires_at) VALUES(?,?,?)",
+                (digest(value), txn, 1600),
+            )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        AuthStore(store.path)
+
+    with sqlite3.connect(store.path) as db:
+        assert db.execute(
+            "SELECT count(*) FROM auth_codes WHERE txn_id=?", (txn,)
+        ).fetchone()[0] == 2
+
+
+def test_issue_auth_code_after_approval(store):
+    txn, _ = store.create_pending(
+        "client1", CALLBACK, "state", "A" * 43, now=1000
+    )
+    assert store.issue_auth_code(txn, now=1001) is None
+    assert store.approve(txn, "owner/claude", now=1002)
+
+    code = store.issue_auth_code(txn, now=1003)
+    assert isinstance(code, str) and len(code) >= 32
+
+    with store.connect() as db:
+        row = db.execute(
+            "SELECT code_hash,expires_at,used_at FROM auth_codes WHERE txn_id=?",
+            (txn,),
+        ).fetchone()
+
+    assert row["code_hash"] == digest(code)
+    assert row["code_hash"] != code
+    assert row["expires_at"] == 1543
+    assert row["used_at"] is None
+    assert store.issue_auth_code(txn, now=1004) is None
+
+
+def test_issue_auth_code_rejects_expired_approval(store):
+    txn, _ = store.create_pending(
+        "client1", CALLBACK, "state", "A" * 43, now=1000
+    )
+    assert store.approve(txn, "owner/claude", now=1001)
+    assert store.issue_auth_code(txn, now=2499) is not None
+
+    txn2, _ = store.create_pending(
+        "client1", CALLBACK, "state2", "A" * 43, now=3000
+    )
+    assert store.approve(txn2, "owner/claude", now=3001)
+    assert store.issue_auth_code(txn2, now=4500) is None
+
+
+@pytest.mark.parametrize("target", ["connection", "profile"])
+def test_issue_auth_code_rejects_revocation(store, target):
+    txn, _ = store.create_pending(
+        "client1", CALLBACK, "state", "A" * 43, now=1000
+    )
+    assert store.approve(txn, "owner/claude", now=1001)
+
+    if target == "connection":
+        assert store.revoke_connection("client1", now=1002)
+    else:
+        assert store.revoke_profile("owner/claude", now=1002)
+
+    assert store.issue_auth_code(txn, now=1003) is None
+
+
+def test_issue_auth_code_once_under_concurrency(store):
+    txn, _ = store.create_pending(
+        "client1", CALLBACK, "state", "A" * 43, now=1000
+    )
+    assert store.approve(txn, "owner/claude", now=1001)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(
+                lambda _: store.issue_auth_code(txn, now=1002),
+                range(2),
+            )
+        )
+
+    codes = [code for code in results if code is not None]
+    assert len(codes) == 1
+
+    with store.connect() as db:
+        count = db.execute(
+            "SELECT COUNT(*) FROM auth_codes WHERE txn_id=?",
+            (txn,),
+        ).fetchone()[0]
+
+    assert count == 1
+    assert digest(codes[0]) != codes[0]
+
+
+def test_redeem_auth_code_success_and_replay(store):
+    import base64
+    import hashlib
+
+    verifier = "V" * 43
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
+
+    txn, _ = store.create_pending(
+        "client1", CALLBACK, "state", challenge, now=1000
+    )
+    assert store.approve(txn, "owner/claude", now=1001)
+
+    code = store.issue_auth_code(txn, now=1002)
+    assert code is not None
+
+    result = store.redeem_auth_code(
+        code, "client1", CALLBACK, verifier,
+        "https://roundtable.rodsrcpark.com/mcp", now=1003
+    )
+
+    assert result == {
+        "client_id": "client1",
+        "scopes": "roundtable.append",
+        "resource": "https://roundtable.rodsrcpark.com/mcp",
+        "txn_id": txn,
+    }
+
+    assert store.redeem_auth_code(
+        code, "client1", CALLBACK, verifier,
+        "https://roundtable.rodsrcpark.com/mcp", now=1004
+    ) is None
+
+    with store.connect() as db:
+        used = db.execute(
+            "SELECT used_at FROM auth_codes WHERE txn_id=?", (txn,)
+        ).fetchone()[0]
+        status = db.execute(
+            "SELECT status FROM pending_txns WHERE txn_id=?", (txn,)
+        ).fetchone()[0]
+
+    assert used == 1003
+    assert status == "consumed"
+
+
+@pytest.mark.parametrize("invalid_field", [
+    "verifier", "client", "callback", "resource"
+])
+def test_redeem_auth_code_rejects_mismatch_without_consuming(store, invalid_field):
+    import base64
+    import hashlib
+
+    verifier = "V" * 43
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
+
+    txn, _ = store.create_pending(
+        "client1", CALLBACK, "state", challenge, now=1000
+    )
+    assert store.approve(txn, "owner/claude", now=1001)
+    code = store.issue_auth_code(txn, now=1002)
+    assert code is not None
+
+    args = {
+        "code": code,
+        "client_id": "client1",
+        "redirect_uri": CALLBACK,
+        "code_verifier": verifier,
+        "resource": "https://roundtable.rodsrcpark.com/mcp",
+        "now": 1003,
+    }
+    changes = {
+        "verifier": ("code_verifier", "X" * 43),
+        "client": ("client_id", "wrong-client"),
+        "callback": ("redirect_uri", "https://wrong.example/callback"),
+        "resource": ("resource", "https://wrong.example/mcp"),
+    }
+    key, value = changes[invalid_field]
+    args[key] = value
+
+    assert store.redeem_auth_code(**args) is None
+
+    with store.connect() as db:
+        assert db.execute(
+            "SELECT used_at FROM auth_codes WHERE txn_id=?", (txn,)
+        ).fetchone()[0] is None
+
+    args[key] = {
+        "code_verifier": verifier,
+        "client_id": "client1",
+        "redirect_uri": CALLBACK,
+        "resource": "https://roundtable.rodsrcpark.com/mcp",
+    }[key]
+    assert store.redeem_auth_code(**args) is not None
+
+
+@pytest.mark.parametrize("redeem_at,expected_success", [
+    (1541, True),
+    (1542, False),
+    (1543, False),
+])
+def test_redeem_auth_code_540_second_boundary(store, redeem_at, expected_success):
+    import base64
+    import hashlib
+
+    verifier = "V" * 43
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
+
+    txn, _ = store.create_pending(
+        "client1", CALLBACK, "state", challenge, now=1000
+    )
+    assert store.approve(txn, "owner/claude", now=1001)
+
+    code = store.issue_auth_code(txn, now=1002)
+    assert code is not None
+
+    result = store.redeem_auth_code(
+        code, "client1", CALLBACK, verifier,
+        "https://roundtable.rodsrcpark.com/mcp",
+        now=redeem_at,
+    )
+    assert (result is not None) is expected_success
+
+
+@pytest.mark.parametrize("target", ["connection", "profile"])
+def test_redeem_auth_code_rejects_revocation(store, target):
+    import base64
+    import hashlib
+
+    verifier = "V" * 43
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
+
+    txn, _ = store.create_pending(
+        "client1", CALLBACK, "state", challenge, now=1000
+    )
+    assert store.approve(txn, "owner/claude", now=1001)
+    code = store.issue_auth_code(txn, now=1002)
+    assert code is not None
+
+    if target == "connection":
+        assert store.revoke_connection("client1", now=1003)
+    else:
+        assert store.revoke_profile("owner/claude", now=1003)
+
+    assert store.redeem_auth_code(
+        code, "client1", CALLBACK, verifier,
+        "https://roundtable.rodsrcpark.com/mcp", now=1004
+    ) is None
+
+    with store.connect() as db:
+        assert db.execute(
+            "SELECT used_at FROM auth_codes WHERE txn_id=?",
+            (txn,),
+        ).fetchone()[0] is None
+
+
+def test_redeem_auth_code_once_under_concurrency(store):
+    import base64
+    import hashlib
+
+    verifier = "V" * 43
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
+
+    txn, _ = store.create_pending(
+        "client1", CALLBACK, "state", challenge, now=1000
+    )
+    assert store.approve(txn, "owner/claude", now=1001)
+    code = store.issue_auth_code(txn, now=1002)
+    assert code is not None
+
+    def redeem(_):
+        return store.redeem_auth_code(
+            code, "client1", CALLBACK, verifier,
+            "https://roundtable.rodsrcpark.com/mcp",
+            now=1003,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(redeem, range(2)))
+
+    assert sum(result is not None for result in results) == 1
+    assert sum(result is None for result in results) == 1
+
+    with store.connect() as db:
+        row = db.execute(
+            "SELECT used_at FROM auth_codes WHERE txn_id=?",
+            (txn,),
+        ).fetchone()
+    assert row["used_at"] == 1003
+
+
+def test_redeem_auth_code_rolls_back_if_transaction_update_fails(store):
+    import base64
+    import hashlib
+
+    verifier = "V" * 43
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
+
+    txn, _ = store.create_pending(
+        "client1", CALLBACK, "state", challenge, now=1000
+    )
+    assert store.approve(txn, "owner/claude", now=1001)
+    code = store.issue_auth_code(txn, now=1002)
+    assert code is not None
+
+    with store.connect() as db:
+        db.execute("""
+            CREATE TRIGGER block_pending_consumption
+            BEFORE UPDATE OF status ON pending_txns
+            WHEN NEW.status = 'consumed'
+            BEGIN
+                SELECT RAISE(IGNORE);
+            END
+        """)
+
+    import sqlite3
+    with pytest.raises(sqlite3.IntegrityError):
+        store.redeem_auth_code(
+            code, "client1", CALLBACK, verifier,
+            "https://roundtable.rodsrcpark.com/mcp",
+            now=1003,
+        )
+
+    with store.connect() as db:
+        row = db.execute("""
+            SELECT a.used_at, t.status
+            FROM auth_codes a
+            JOIN pending_txns t ON t.txn_id = a.txn_id
+            WHERE t.txn_id = ?
+        """, (txn,)).fetchone()
+
+    assert row["used_at"] is None
+    assert row["status"] == "approved"
