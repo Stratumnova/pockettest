@@ -5,6 +5,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from secure_files import secure_read, secure_append, secure_rdwr
+from ledger_lock import ledger_transaction
+from identity import load_identities
 from storage import resolve_data_root, prepare_data_root
 from typing import Any
 from mcp.server.fastmcp import FastMCP
@@ -120,6 +122,7 @@ def read_logic(who):
 async def append_logic(who,message,references=None):
     refs=references or []
     async with LOCK:
+      with ledger_transaction(ROOT):
         events=_parse_ledger()
         if pending_read[who] is None:
             last=_last_mine(events,who)
@@ -154,18 +157,6 @@ def make_mcp(who):
         return await append_logic(who,message,references)
     return m
 
-GPT=make_mcp("gpt"); CLAUDE=make_mcp("claude")
-def _secret_path(name):
-    value=os.environ.get(name,"").strip("/")
-    if len(value)<24 or "CHANGE-ME" in value.upper():
-        raise SystemExit(f"{name} must be a random path of at least 24 characters")
-    return "/"+value
-
-GPT_PATH=_secret_path("POCKET_GPT_PATH")
-CLAUDE_PATH=_secret_path("POCKET_CLAUDE_PATH")
-if GPT_PATH==CLAUDE_PATH:
-    raise SystemExit("GPT and Claude paths must differ")
-
 def configure_storage(env_value):
     global ROOT, LEDGER, QUARANTINE
 
@@ -177,22 +168,30 @@ def configure_storage(env_value):
     ledger = root / "roundtable.jsonl"
     quarantine = root / "quarantine.log"
 
-    for path in (ledger, quarantine):
-        with secure_append(path):
-            pass
+    with ledger_transaction(root):
+        for path in (ledger, quarantine):
+            with secure_append(path):
+                pass
 
     ROOT, LEDGER, QUARANTINE = root, ledger, quarantine
 
 
-@asynccontextmanager
-async def lifespan(app):
-    configure_storage(os.environ.get("A25_SHARED_DATA"))
-    async with LOCK:
-        recover_once()
-    async with GPT.session_manager.run(), CLAUDE.session_manager.run():
-        yield
+def create_app():
+    """Build routes from fresh runtime secrets; no import-time credential reads."""
+    identities = load_identities()
+    gpt = make_mcp("gpt")
+    claude = make_mcp("claude")
 
-app=Starlette(routes=[
-    Mount(GPT_PATH,app=GPT.streamable_http_app()),
-    Mount(CLAUDE_PATH,app=CLAUDE.streamable_http_app()),
-],lifespan=lifespan)
+    @asynccontextmanager
+    async def lifespan(app):
+        configure_storage(os.environ.get("A25_SHARED_DATA"))
+        async with LOCK:
+            with ledger_transaction(ROOT):
+                recover_once()
+        async with gpt.session_manager.run(), claude.session_manager.run():
+            yield
+
+    return Starlette(routes=[
+        Mount(identities.gpt_path, app=gpt.streamable_http_app()),
+        Mount(identities.claude_path, app=claude.streamable_http_app()),
+    ], lifespan=lifespan)
