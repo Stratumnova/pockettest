@@ -76,3 +76,19 @@ Owner should fetch pinned commit, independently hash all changed files,
 and run the full suite in a detached checkout. Claude should review the
 locking boundary, factory setup, CLI, and absence of owner HTTP routes.
 A green test result does not authorize merge or deployment.
+
+## Claude review #0231 follow-up
+
+- `ledger_store.py` now centralizes parsing, event numbering, encoding,
+  complete writes and fsync for server and owner CLI. Both continue to
+  acquire `ledger_transaction` before read/compute/append.
+- Added concurrent **owner process versus server append** test; original
+  CLI-versus-CLI process test remains.
+- Integration test uses monkeypatch to restore server globals.
+- Allowed-host configuration is now `A25_SHARED_ALLOWED_HOSTS`;
+  legacy `POCKET_ALLOWED_HOSTS` is not consumed.
+- Existing Gate-01-derived status labels remain as-is for Stage 3.
+- Starlette Mount routes by path; `IdentityConfig.identify()` is
+  not invoked by HTTP routing. Secret paths are bearer credentials.
+- No existing test file was modified. The added integration test was
+  expanded. Re-run the complete suite on the pinned commit.
