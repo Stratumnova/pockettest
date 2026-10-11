@@ -50,3 +50,29 @@ integration, merge, or deployment.
 - Non-ASCII request paths now fail closed instead of raising TypeError.
 - New environment names deliberately do not read legacy Gate-01 secrets.
 - Server integration must replace, not duplicate, its existing validator.
+
+## Integration candidate (review required)
+
+Added `ledger_lock.py`, `owner_cli.py`, and
+`tests/test_stage2_integration.py`. Updated `server.py` only; **existing
+test files remain unchanged**.
+
+- `create_app()` reads the new identity configuration at factory call time.
+  Intended launch syntax after review is `uvicorn --factory server:create_app`.
+  Importing `server` alone reads no credential or storage configuration.
+- The server has only GPT and Claude MCP mounts. Owner CLI has no HTTP route.
+- `ledger_transaction(root)` takes an exclusive `fcntl.flock` on a
+  persistent `.ledger.lock` regular file (mode 0600). Both owner CLI
+  and server append paths hold it across read/compute/write/fsync.
+  The server also uses it during startup recovery.
+- The lock file must **never be deleted/replaced** while writers run.
+- This is a proposal, **not production authorization**. Secret paths remain
+  bearer credentials, not OAuth, and this implementation does not grant
+  terminal access.
+
+### Verification
+
+Owner should fetch pinned commit, independently hash all changed files,
+and run the full suite in a detached checkout. Claude should review the
+locking boundary, factory setup, CLI, and absence of owner HTTP routes.
+A green test result does not authorize merge or deployment.
