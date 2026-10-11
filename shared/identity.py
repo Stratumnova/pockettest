@@ -35,6 +35,8 @@ class IdentityConfig:
 
     def identify(self, path: str) -> str | None:
         """Constant-time compare; no prefix, query, or substring matching."""
+        if not isinstance(path, str) or not path.isascii():
+            return None
         gpt = compare_digest(path, self.gpt_path)
         claude = compare_digest(path, self.claude_path)
         if gpt:
@@ -57,14 +59,8 @@ def _parse_secret(value: str | None, name: str) -> str:
 def load_identities(env: Mapping[str, str] | None = None) -> IdentityConfig:
     """Fail closed; do not generate, print, or persist credentials."""
     source = os.environ if env is None else env
-    gpt = _parse_secret(source.get("POCKET_GPT_PATH"), "POCKET_GPT_PATH")
-    claude = _parse_secret(source.get("POCKET_CLAUDE_PATH"), "POCKET_CLAUDE_PATH")
+    gpt = _parse_secret(source.get("A25_SHARED_GPT_PATH"), "A25_SHARED_GPT_PATH")
+    claude = _parse_secret(source.get("A25_SHARED_CLAUDE_PATH"), "A25_SHARED_CLAUDE_PATH")
     if compare_digest(gpt, claude):
         raise IdentityConfigurationError("GPT and Claude credentials must differ")
     return IdentityConfig(gpt_path=gpt, claude_path=claude)
-
-
-def require_local_owner(*, peer_is_loopback: bool, actor: str) -> None:
-    """Local CLI gate; never infer owner identity from an HTTP path/header."""
-    if actor != "owner" or not peer_is_loopback:
-        raise PermissionError("owner operations require local CLI authority")
