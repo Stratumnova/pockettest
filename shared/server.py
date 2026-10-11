@@ -4,33 +4,79 @@ import asyncio, json, os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from secure_files import secure_read, secure_append, secure_rdwr
+from storage import resolve_data_root, prepare_data_root
 from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.routing import Mount
 
-ROOT=Path(os.environ.get("POCKET_GATE_DIR",".")).resolve()
-LEDGER=ROOT/"roundtable.jsonl"; QUARANTINE=ROOT/"quarantine.log"
+# Configured during lifespan startup, never at import.
+ROOT = None
+LEDGER = None
+QUARANTINE = None
 LOCK=asyncio.Lock()
 pending_read={"gpt":None,"claude":None}
 
+def _require_storage():
+    if ROOT is None or LEDGER is None or QUARANTINE is None:
+        raise RuntimeError("Shared Space storage not initialized")
+    return ROOT, LEDGER, QUARANTINE
+
+
 def _parse_ledger()->list[dict[str,Any]]:
-    if not LEDGER.exists(): return []
-    raw=LEDGER.read_bytes()
+    _require_storage()
+    try:
+        with secure_read(LEDGER) as fd:
+            chunks = []
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+    except FileNotFoundError:
+        return []
+
+    raw = b"".join(chunks)
     # Parse only complete newline-terminated records. Never repair during a read.
     cut = len(raw) if raw.endswith(b"\n") else raw.rfind(b"\n") + 1
     return [json.loads(x) for x in raw[:cut].splitlines() if x.strip()]
 
+
 def recover_once():
-    ROOT.mkdir(parents=True,exist_ok=True)
-    if not LEDGER.exists(): return
-    raw=LEDGER.read_bytes()
-    if raw and not raw.endswith(b"\n"):
-        cut=raw.rfind(b"\n")+1; bad=raw[cut:]
-        if bad:
-            with QUARANTINE.open("ab") as q: q.write(bad+b"\n")
-        with LEDGER.open("r+b") as f: f.truncate(cut); f.flush(); os.fsync(f.fileno())
+    _require_storage()
+
+    try:
+        with secure_rdwr(LEDGER) as fd:
+            chunks = []
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+
+            raw = b"".join(chunks)
+            if not raw or raw.endswith(b"\n"):
+                return
+
+            cut = raw.rfind(b"\n") + 1
+            bad = raw[cut:]
+
+            if bad:
+                with secure_append(QUARANTINE) as qfd:
+                    _write_all(qfd, bad + b"\n")
+                    os.fsync(qfd)
+
+            os.ftruncate(fd, cut)
+            os.fsync(fd)
+
+    except FileNotFoundError:
+        if not LEDGER.exists():
+            return
+        raise
+
+
 
 def _cursor(events,who):
     mine=[e for e in events if e["author"]==who]
@@ -39,11 +85,25 @@ def _cursor(events,who):
 def _last_mine(events,who):
     return next((e for e in reversed(events) if e["author"]==who),None)
 
+def _write_all(fd, data):
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("Storage write made no progress")
+        view = view[written:]
+
+
 def _write_event(e):
-    ROOT.mkdir(parents=True,exist_ok=True)
-    with LEDGER.open("ab") as f:
-        f.write((json.dumps(e,separators=(",",":"),ensure_ascii=False)+"\n").encode())
-        f.flush(); os.fsync(f.fileno())
+    _require_storage()
+    data = (
+        json.dumps(e, separators=(",", ":"), ensure_ascii=False) + "\n"
+    ).encode("utf-8")
+
+    with secure_append(LEDGER) as fd:
+        _write_all(fd, data)
+        os.fsync(fd)
+
 
 def status(who):
     return {"server":"Pocket Server Gate-01","protocol":"roundtable-v1","identity":who,
@@ -106,9 +166,29 @@ CLAUDE_PATH=_secret_path("POCKET_CLAUDE_PATH")
 if GPT_PATH==CLAUDE_PATH:
     raise SystemExit("GPT and Claude paths must differ")
 
+def configure_storage(env_value):
+    global ROOT, LEDGER, QUARANTINE
+
+    ROOT = None
+    LEDGER = None
+    QUARANTINE = None
+
+    root = prepare_data_root(resolve_data_root(env_value))
+    ledger = root / "roundtable.jsonl"
+    quarantine = root / "quarantine.log"
+
+    for path in (ledger, quarantine):
+        with secure_append(path):
+            pass
+
+    ROOT, LEDGER, QUARANTINE = root, ledger, quarantine
+
+
 @asynccontextmanager
 async def lifespan(app):
-    async with LOCK: recover_once()
+    configure_storage(os.environ.get("A25_SHARED_DATA"))
+    async with LOCK:
+        recover_once()
     async with GPT.session_manager.run(), CLAUDE.session_manager.run():
         yield
 
