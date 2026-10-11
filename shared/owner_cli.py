@@ -5,26 +5,16 @@ the shared ledger with the same inter-process lock as the server.
 """
 from __future__ import annotations
 import argparse
-import json
 import os
 from datetime import datetime, timezone
 
 from ledger_lock import ledger_transaction
-from secure_files import secure_append, secure_read
+from ledger_store import read_events, write_event, next_event
 from storage import prepare_data_root, resolve_data_root
 
 
 def _read_events(path):
-    try:
-        with secure_read(path) as fd:
-            with os.fdopen(os.dup(fd), "rb") as stream:
-                raw = stream.read()
-    except FileNotFoundError:
-        return []
-    if raw and not raw.endswith(b"\n"):
-        raise RuntimeError("incomplete ledger tail: server recovery required")
-    return [json.loads(line) for line in raw.splitlines() if line.strip()]
-
+    return read_events(path)
 
 def append_owner(message, data_root=None):
     """Atomic owner append. This is not exposed through MCP or HTTP."""
@@ -34,23 +24,12 @@ def append_owner(message, data_root=None):
     ledger = root / "roundtable.jsonl"
     with ledger_transaction(root):
         events = _read_events(ledger)
-        event = {
-            "id": events[-1]["id"] + 1 if events else 1,
-            "author": "owner",
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "message": message,
-            "references": [],
-            "cursor_through": events[-1]["id"] if events else 0,
-        }
-        data = (json.dumps(event, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
-        with secure_append(ledger) as fd:
-            view = memoryview(data)
-            while view:
-                count = os.write(fd, view)
-                if count <= 0:
-                    raise OSError("ledger append stalled")
-                view = view[count:]
-            os.fsync(fd)
+        event = next_event(
+            events, author="owner", message=message, references=[],
+            cursor_through=events[-1]["id"] if events else 0,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        write_event(ledger, event)
     return event["id"]
 
 
