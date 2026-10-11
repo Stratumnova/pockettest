@@ -7,6 +7,7 @@ from pathlib import Path
 from secure_files import secure_read, secure_append, secure_rdwr
 from ledger_lock import ledger_transaction
 from identity import load_identities
+from ledger_store import read_events, write_all, write_event, next_event
 from storage import resolve_data_root, prepare_data_root
 from typing import Any
 from mcp.server.fastmcp import FastMCP
@@ -29,22 +30,7 @@ def _require_storage():
 
 def _parse_ledger()->list[dict[str,Any]]:
     _require_storage()
-    try:
-        with secure_read(LEDGER) as fd:
-            chunks = []
-            while True:
-                chunk = os.read(fd, 65536)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-    except FileNotFoundError:
-        return []
-
-    raw = b"".join(chunks)
-    # Parse only complete newline-terminated records. Never repair during a read.
-    cut = len(raw) if raw.endswith(b"\n") else raw.rfind(b"\n") + 1
-    return [json.loads(x) for x in raw[:cut].splitlines() if x.strip()]
-
+    return read_events(LEDGER, allow_incomplete=True)
 
 def recover_once():
     _require_storage()
@@ -88,24 +74,11 @@ def _last_mine(events,who):
     return next((e for e in reversed(events) if e["author"]==who),None)
 
 def _write_all(fd, data):
-    view = memoryview(data)
-    while view:
-        written = os.write(fd, view)
-        if written <= 0:
-            raise OSError("Storage write made no progress")
-        view = view[written:]
-
+    return write_all(fd, data)
 
 def _write_event(e):
     _require_storage()
-    data = (
-        json.dumps(e, separators=(",", ":"), ensure_ascii=False) + "\n"
-    ).encode("utf-8")
-
-    with secure_append(LEDGER) as fd:
-        _write_all(fd, data)
-        os.fsync(fd)
-
+    return write_event(LEDGER, e)
 
 def status(who):
     return {"server":"Pocket Server Gate-01","protocol":"roundtable-v1","identity":who,
@@ -130,15 +103,14 @@ async def append_logic(who,message,references=None):
                 return {"ok":True,"event_id":last["id"],"duplicate":True}
             return {"ok":False,"error":"read first"}
         through=int(pending_read[who])
-        event={"id":(events[-1]["id"]+1 if events else 1),"author":who,
-               "ts":datetime.now(timezone.utc).isoformat(),"message":message,
-               "references":refs,"cursor_through":through}
+        event=next_event(events, author=who, message=message, references=refs,
+                         cursor_through=through, timestamp=datetime.now(timezone.utc).isoformat())
         _write_event(event); pending_read[who]=None
         return {"ok":True,"event_id":event["id"],"duplicate":False}
 
 def _transport_security():
     hosts=["127.0.0.1:*","localhost:*","[::1]:*"]
-    extra=[h.strip().lower() for h in os.environ.get("POCKET_ALLOWED_HOSTS","").split(",") if h.strip()]
+    extra=[h.strip().lower() for h in os.environ.get("A25_SHARED_ALLOWED_HOSTS","").split(",") if h.strip()]
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=hosts+extra,
