@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "name": "A25 Zone 1 Actions",
+  "kind": "mcp-streamable-http",
+  "connection": {
+    "server": "existing Pocket Server shared/server.py",
+    "endpoint": "owner-provided HTTPS tunnel + existing POCKET_GPT_PATH",
+    "independent_from": "A25 GPT Terminal read-only viewport",
+    "requires_new_server": false,
+    "requires_new_route": false
+  },
+  "tools": [
+    {
+      "name": "workspace_inspect",
+      "args": [
+        "path"
+      ],
+      "mode": "view"
+    },
+    {
+      "name": "workspace_read",
+      "args": [
+        "path"
+      ],
+      "mode": "view"
+    },
+    {
+      "name": "workspace_create",
+      "args": [
+        "path",
+        "content"
+      ],
+      "mode": "write"
+    },
+    {
+      "name": "workspace_edit",
+      "args": [
+        "path",
+        "content"
+      ],
+      "mode": "write"
+    },
+    {
+      "name": "workspace_delete",
+      "args": [
+        "path"
+      ],
+      "mode": "delete"
+    },
+    {
+      "name": "workspace_command",
+      "args": [
+        "action",
+        "path"
+      ],
+      "mode": "command"
+    }
+  ],
+  "allowed_command_actions": [
+    "pwd",
+    "ls",
+    "python_version",
+    "pytest"
+  ],
+  "verification": {
+    "initial": "discover six workspace tools on separate Actions connection",
+    "runtime": "owner-authorized phone verification required"
+  },
+  "limitations": [
+    "manifest is setup metadata, not an installed ChatGPT connector",
+    "existing server and original terminal viewport unchanged"
+  ]
+}
