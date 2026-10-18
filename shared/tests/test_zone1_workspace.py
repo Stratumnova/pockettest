@@ -32,3 +32,11 @@ def test_reject_escape_and_unlisted_commands():
         (Path(d) / "link").symlink_to(outside)
         with pytest.raises(ValueError):
             w.write("link/file.txt", "x")
+
+def test_reject_relative_root_and_nul_path():
+    with pytest.raises(ValueError, match="absolute"):
+        Workspace("relative-zone1-root")
+    with tempfile.TemporaryDirectory() as d:
+        w = Workspace(d)
+        with pytest.raises(ValueError, match="invalid relative path"):
+            w.read("bad" + chr(0) + "path")
