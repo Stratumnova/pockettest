@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from secure_files import secure_read, secure_append, secure_rdwr
 from storage import resolve_data_root, prepare_data_root
+from zone1_workspace import Workspace
 from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -18,6 +19,7 @@ LEDGER = None
 QUARANTINE = None
 LOCK=asyncio.Lock()
 pending_read={"gpt":None,"claude":None}
+ZONE1 = None
 
 def _require_storage():
     if ROOT is None or LEDGER is None or QUARANTINE is None:
@@ -152,7 +154,37 @@ def make_mcp(who):
     @m.tool()
     async def append_roundtable(message:str,references:list[str]|None=None):
         return await append_logic(who,message,references)
+    @m.tool()
+    def workspace_inspect(path: str = "."):
+        """List files and directories in Zone 1."""
+        return _workspace().inspect(path)
+    @m.tool()
+    def workspace_read(path: str):
+        """Read a UTF-8 Zone 1 file."""
+        return _workspace().read(path)
+    @m.tool()
+    def workspace_create(path: str, content: str):
+        """Create a new UTF-8 Zone 1 file."""
+        return _workspace().write(path, content)
+    @m.tool()
+    def workspace_edit(path: str, content: str):
+        """Replace an existing UTF-8 Zone 1 file."""
+        _workspace().path(path, True)
+        return _workspace().write(path, content, overwrite=True)
+    @m.tool()
+    def workspace_delete(path: str):
+        """Delete one Zone 1 regular file."""
+        return _workspace().delete(path)
+    @m.tool()
+    def workspace_command(action: str, path: str = "."):
+        """Run one predefined development command inside Zone 1."""
+        return _workspace().command(action, path)
     return m
+
+def _workspace():
+    if ZONE1 is None:
+        raise RuntimeError("Zone 1 not initialized")
+    return ZONE1
 
 GPT=make_mcp("gpt"); CLAUDE=make_mcp("claude")
 def _secret_path(name):
@@ -186,7 +218,9 @@ def configure_storage(env_value):
 
 @asynccontextmanager
 async def lifespan(app):
+    global ZONE1
     configure_storage(os.environ.get("A25_SHARED_DATA"))
+    ZONE1 = Workspace(os.environ.get("A25_ZONE1_ROOT"))
     async with LOCK:
         recover_once()
     async with GPT.session_manager.run(), CLAUDE.session_manager.run():
