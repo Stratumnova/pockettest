@@ -11,13 +11,14 @@ class Workspace:
     def __init__(self, root):
         if not root:
             raise ValueError("A25_ZONE1_ROOT is required")
-        self.root = Path(root).expanduser().resolve()
-        if not self.root.is_absolute():
+        candidate_root = Path(root).expanduser()
+        if not candidate_root.is_absolute():
             raise ValueError("workspace root must be absolute")
+        self.root = candidate_root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
 
     def path(self, relative, existing=False):
-        if not isinstance(relative, str) or not relative or "\\x00" in relative:
+        if not isinstance(relative, str) or not relative or chr(0) in relative:
             raise ValueError("invalid relative path")
         p = Path(relative)
         if p.is_absolute() or ".." in p.parts or p == Path("."):
