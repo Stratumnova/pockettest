@@ -1,7 +1,6 @@
-"""Gate-02A: public, deny-all OAuth skeleton.
+"""Gate-02A: deny-all OAuth baseline with opt-in isolated loopback read test mode.
 
-A5-prep observation complete; registration and observation disabled.
-Do not grant access to private files.
+Anonymous local mode must never be exposed through a public tunnel or proxy.
 """
 
 import base64
@@ -53,6 +52,13 @@ def read_fixed_file(path):
         return {"error": "shared_file_unavailable"}
 
 
+FORWARDED_HEADERS = frozenset({
+    b"cf-connecting-ip", b"cf-ray", b"x-forwarded-for",
+    b"forwarded", b"x-real-ip",
+})
+LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]"})
+
+
 class LoopbackOnly:
     """Deny anonymous test-mode requests unless peer is loopback."""
     def __init__(self, app):
@@ -61,7 +67,17 @@ class LoopbackOnly:
     async def __call__(self, scope, receive, send):
         if scope["type"] in ("http", "websocket"):
             peer = scope.get("client")
-            if not peer or peer[0] not in ("127.0.0.1", "::1"):
+            headers = scope.get("headers", [])
+            host_values = [value.decode("ascii", "ignore").lower().strip()
+                           for name, value in headers if name.lower() == b"host"]
+            safe_host = (len(host_values) == 1 and
+                         host_values[0].split(":")[0] in LOCAL_HOSTS)
+            # Bracketed IPv6 hosts require special handling, not a naive split.
+            if len(host_values) == 1 and host_values[0].startswith("[::1]"):
+                safe_host = host_values[0] == "[::1]" or host_values[0].startswith("[::1]:")
+            unsafe_forwarding = any(name.lower() in FORWARDED_HEADERS for name, _ in headers)
+            if (not peer or peer[0] not in ("127.0.0.1", "::1")
+                    or not safe_host or unsafe_forwarding):
                 if scope["type"] == "http":
                     await send({"type": "http.response.start", "status": 403,
                                 "headers": [(b"content-length", b"0")]})
@@ -121,7 +137,7 @@ mcp = FastMCP(
             "127.0.0.1:*",
             "localhost:*",
             "[::1]:*",
-            "roundtable.rodsrcpark.com",
+            *( [] if LOCAL_READ_MODE else ["roundtable.rodsrcpark.com"] ),
         ],
         allowed_origins=[PUBLIC_ORIGIN],
     ),
@@ -139,7 +155,7 @@ def read_shared_file() -> dict:
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health(request: Request):
-    return JSONResponse({"status": "gate02a-deny-all", "ready": False})
+    return JSONResponse({"status": "gate02a-local-read" if LOCAL_READ_MODE else "gate02a-deny-all", "ready": False})
 
 
 starlette_app = mcp.streamable_http_app()
